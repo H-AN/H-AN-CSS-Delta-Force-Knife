@@ -29,7 +29,7 @@
 - **右键重击**：支持 1 个固定动画，或逗号分隔多个动画交替循环（北极星为 `8,6`）
 - **伤害完全接管**：忽略武器原生伤害，按组配置的基础伤害 + 爆头倍率重新计算
 - **三套音效系统**：
-  - 每刀攻击后的**延迟旋转音**（延迟 = 动画帧数 ÷ 66 秒，向下取整到 0.1 秒；新攻击自动打断旧攻击尚未播放的旋转音）
+  - 每刀攻击后的**延迟转刀音**（配置格式 `帧号:路径`，播放时刻 = 转刀帧号 ÷ 动画 fps，精确换算不取整；新攻击自动打断旧攻击尚未播放的转刀音）
   - **命中音**（仅攻击者可听）
   - **击杀音**：根据最近命中部位自动区分**爆头击杀音 / 普通击杀音**
   - 任何一个音效路径**留空即不播放**
@@ -86,18 +86,20 @@
 | `ClassName` | **必填**。武器实体名称 | 无（缺省则跳过该组） |
 | `IdleTimeout` | 连续攻击间隔超过此时间（秒）后，左键连招从第一刀重新开始 | `2.0` |
 | `LeftSequence1~3` | 左键三刀的 QC 动画序列号 | `4` `5` `6` |
-| `LeftFrames1~3` | 左键三刀动画帧数，同时决定旋转音延迟 = 帧数 ÷ 66 秒 | `40` `60` `61` |
+| `LeftFrames1~3` | 左键三刀动画总帧数（传给武器系统，动画持续时长 = 帧数 ÷ 30 秒，不参与音效计算） | `40` `60` `61` |
+| `LeftFps1~3` | 左键三刀动画的 fps，转刀音效帧号换算用 | `66` |
 | `LeftInterval1` | 左键 **第三刀 → 第一刀** 的攻击间隔（秒） | `0.6` |
 | `LeftInterval2` | 左键 **第一刀 → 第二刀** 的攻击间隔（秒） | `0.3` |
 | `LeftInterval3` | 左键 **第二刀 → 第三刀** 的攻击间隔（秒） | `0.4` |
 | `LeftDamage1~3` | 左键三刀基础伤害 | `30` `30` `42` |
 | `RightSequence` | 右键 QC 动画序列号，**逗号分隔**：填 1 个 = 固定动画；填多个 = 按顺序交替循环 | `8,6` |
-| `RightFrames` | 右键动画帧数 | `61` |
+| `RightFrames` | 右键动画总帧数（传给武器系统，不参与音效计算） | `61` |
+| `RightFps` | 右键动画 fps，转刀音效帧号换算用 | `66` |
 | `RightInterval` | 右键 → 下一次右键 的攻击间隔（秒） | `0.6` |
 | `RightDamage` | 右键基础伤害 | `60` |
 | `HeadshotMultiplier` | 爆头伤害倍率 | `2.0` |
-| `RotateSound1~3` | 左键各刀攻击后的延迟旋转音效路径（留空 = 不播放） | 空 |
-| `RightRotateSound` | 右键攻击后的延迟旋转音效路径（留空 = 不播放） | 空 |
+| `RotateSound1~3` | 左键各刀转刀音效，格式 **`帧号:路径`** = 动画第 N 帧开始播放（不带帧号 = 第 0 帧立即播放；留空 = 不播放） | 空 |
+| `RightRotateSound` | 右键转刀音效，格式同 `RotateSound1~3` | 空 |
 | `HitSound` | 普通命中音效路径（留空 = 不播放） | 空 |
 | `KillSound` | 普通击杀音效路径（留空 = 不播放） | 空 |
 | `HeadshotSound` | 爆头击杀音效路径（留空 = 不播放） | 空 |
@@ -134,10 +136,10 @@
 
         "HeadshotMultiplier"    "2.0"
 
-        "RotateSound1"          "weapons/beijixing/beijixing_rotate_1.wav"
-        "RotateSound2"          "weapons/beijixing/beijixing_rotate_2.wav"
-        "RotateSound3"          "weapons/beijixing/beijixing_rotate_3.wav"
-        "RightRotateSound"      "weapons/beijixing/beijixing_rotate_3.wav"
+        "RotateSound1"          "40:weapons/beijixing/beijixing_rotate_1.wav"
+        "RotateSound2"          "60:weapons/beijixing/beijixing_rotate_2.wav"
+        "RotateSound3"          "61:weapons/beijixing/beijixing_rotate_3.wav"
+        "RightRotateSound"      "61:weapons/beijixing/beijixing_rotate_3.wav"
 
         "HitSound"              "weapons/beijixing/hit.wav"
         "KillSound"             "weapons/beijixing/kill.wav"
@@ -159,6 +161,8 @@
     "LeftSequence1"     "4"
     "LeftSequence2"     "5"
     "LeftSequence3"     "6"
+    "LeftFps1"          "64"     // 动画 fps（不填默认 66）
+    "RotateSound1"      "40:weapons/mynewknife/rotate_1.wav"   // 动画第 40 帧开始播放转刀音
     "RightSequence"     "8"      // 只填一个 = 固定重击动画
     // ...其余项按需填写，未填写的键使用北极星默认值
 }
@@ -168,7 +172,7 @@
 
 - 通过 TempEnt Hook `PlayerAnimEvent` 捕获玩家的右键（`m_iEvent=0`）/左键（`m_iEvent=1`）攻击动画事件，推进连招状态机，改写 `m_flNextPrimaryAttack` / `m_flNextSecondaryAttack` / `m_flNextAttack` 控制攻速，并调用 HanWeaponSystem 的 `Han_SetClientCustomAnim` 播放自定义动画
 - 通过 `SDKHook_TraceAttack` 接管伤害：从攻击者视角对受害者做射线检测取命中部位，命中头部（1）按爆头倍率计算，射线未命中（0）同样按爆头兜底（与北极星行为一致）
-- 延迟旋转音通过携带攻击 ID 的定时器播放，新攻击会作废旧攻击尚未播放的旋转音
+- 转刀音通过携带攻击 ID 的定时器播放，延迟 = 配置的转刀帧号 ÷ 动画 fps（精确换算，不做取整）；新攻击会作废旧攻击尚未播放的转刀音
 - 命中部位写入 `player_hurt` 事件的 `hitgroup` 字段并记录，供击杀音判断
 
 ## 行为细节

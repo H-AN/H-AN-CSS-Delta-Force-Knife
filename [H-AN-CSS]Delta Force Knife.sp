@@ -12,7 +12,7 @@ public Plugin myinfo =
     name = "[H-AN]CS起源三角洲刀具 Delta Force Knife",
     author = "华仔 H-AN",
     description = "华仔 H-AN 三角洲风格刀具通用驱动插件(北极星等, 组配置驱动)",
-    version = "1.0",
+    version = "1.1",
     url = "[H-AN]武器系统三角洲, QQ群107866133, github https://github.com/H-AN"
 };
 
@@ -40,22 +40,26 @@ enum struct DeltaKnifeCfg
     float fIdleTimeout;                         // 连招空闲超时, 超过则连招重置
 
     int iLeftSeq[LEFT_COMBO_COUNT];             // 左键三刀 QC 序列号
-    int iLeftFrames[LEFT_COMBO_COUNT];          // 左键三刀动画帧数(同时决定旋转音延迟 = 帧数/66)
+    int iLeftFrames[LEFT_COMBO_COUNT];          // 左键三刀动画总帧数(传给武器系统, 动画持续时长 = 帧数/30, 不参与音效)
+    int iLeftFps[LEFT_COMBO_COUNT];             // 左键三刀动画 fps(转刀音效帧号换算用, 缺省 66)
     float fLeftInterval[LEFT_COMBO_COUNT];      // 该刀之后到下一刀的间隔 [0]=一->二 [1]=二->三 [2]=三->一
     float fLeftDamage[LEFT_COMBO_COUNT];        // 左键三刀基础伤害
 
     int iRightSeq[MAX_RIGHT_SEQ];               // 右键 QC 序列号列表(1个=固定, 多个=交替循环)
     int iRightSeqCount;                         // 右键序列实际数量
-    int iRightFrames;                           // 右键动画帧数
+    int iRightFrames;                           // 右键动画总帧数(传给武器系统, 不参与音效)
+    int iRightFps;                              // 右键动画 fps(转刀音效帧号换算用, 缺省 66)
     float fRightInterval;                       // 右键攻击间隔
     float fRightDamage;                         // 右键基础伤害
 
     float fHeadshotMultiplier;                  // 爆头伤害倍率
 
-    char sRotateSound1[PLATFORM_MAX_PATH];      // 左键第一刀后的延迟旋转音(留空不播)
+    int iRotateFrame[LEFT_COMBO_COUNT];         // 左键各刀转刀起始帧(对应 RotateSound1~3 的帧号部分, 纯路径=0 即立即播放)
+    char sRotateSound1[PLATFORM_MAX_PATH];      // 左键第一刀转刀音效 "帧号:路径" 或 "路径"(留空不播)
     char sRotateSound2[PLATFORM_MAX_PATH];      // 左键第二刀
     char sRotateSound3[PLATFORM_MAX_PATH];      // 左键第三刀
-    char sRightRotateSound[PLATFORM_MAX_PATH];  // 右键
+    int iRightRotateFrame;                      // 右键转刀起始帧(对应 RightRotateSound 的帧号部分)
+    char sRightRotateSound[PLATFORM_MAX_PATH];  // 右键转刀音效 "帧号:路径" 或 "路径"(留空不播)
 
     char sHitSound[PLATFORM_MAX_PATH];          // 普通命中音(留空不播)
     char sKillSound[PLATFORM_MAX_PATH];         // 普通击杀音(留空不播)
@@ -287,7 +291,8 @@ public Action EventPlayerAnim(const char[] te_name, const int[] Players, int num
 
         seq = g_Knives[idx].iRightSeq[rightPhase];
         frames = g_Knives[idx].iRightFrames;
-        seqdelay = float(frames) / 66.0;
+        // 转刀音效延迟 = 转刀起始帧 ÷ 动画fps, 精确无截断
+        seqdelay = float(g_Knives[idx].iRightRotateFrame) / float(g_Knives[idx].iRightFps);
 
         g_iRightPhase[client] = (rightPhase + 1) % g_Knives[idx].iRightSeqCount;
 
@@ -306,7 +311,8 @@ public Action EventPlayerAnim(const char[] te_name, const int[] Players, int num
 
         seq = g_Knives[idx].iLeftSeq[phase];
         frames = g_Knives[idx].iLeftFrames[phase];
-        seqdelay = float(frames) / 66.0;
+        // 转刀音效延迟 = 转刀起始帧 ÷ 动画fps, 精确无截断
+        seqdelay = float(g_Knives[idx].iRotateFrame[phase]) / float(g_Knives[idx].iLeftFps[phase]);
 
         if (!wasIdle)
         {
@@ -332,7 +338,6 @@ public Action EventPlayerAnim(const char[] te_name, const int[] Players, int num
     pack.WriteCell(idx);
     pack.WriteCell(slot);
 
-    seqdelay = RoundToFloor(seqdelay * 10.0) / 10.0;
     CreateTimer(seqdelay, Timer_DelaySound, pack, TIMER_FLAG_NO_MAPCHANGE | TIMER_DATA_HNDL_CLOSE);
 
     return Plugin_Continue;
@@ -587,6 +592,11 @@ void LoadKnifeGroup(Handle kv, const char[] groupName)
         Format(key, sizeof(key), "LeftFrames%d", i + 1);
         g_Knives[idx].iLeftFrames[i] = KvGetNum(kv, key, sDefaultLeftFrames[i]);
 
+        Format(key, sizeof(key), "LeftFps%d", i + 1);
+        g_Knives[idx].iLeftFps[i] = KvGetNum(kv, key, 66);
+        if (g_Knives[idx].iLeftFps[i] <= 0)
+            g_Knives[idx].iLeftFps[i] = 66;
+
         // 间隔键含义(与北极星配置注释一致): Interval1=三->一, Interval2=一->二, Interval3=二->三
         // 存放为"该刀之后到下一刀"的间隔: [0]=一->二取Interval2, [1]=二->三取Interval3, [2]=三->一取Interval1
         Format(key, sizeof(key), "LeftInterval%d", (i + 1) % LEFT_COMBO_COUNT + 1);
@@ -621,15 +631,32 @@ void LoadKnifeGroup(Handle kv, const char[] groupName)
     }
 
     g_Knives[idx].iRightFrames = KvGetNum(kv, "RightFrames", 61);
+    g_Knives[idx].iRightFps = KvGetNum(kv, "RightFps", 66);
+    if (g_Knives[idx].iRightFps <= 0)
+        g_Knives[idx].iRightFps = 66;
     g_Knives[idx].fRightInterval = KvGetFloat(kv, "RightInterval", 0.6);
     g_Knives[idx].fRightDamage = KvGetFloat(kv, "RightDamage", 60.0);
     g_Knives[idx].fHeadshotMultiplier = KvGetFloat(kv, "HeadshotMultiplier", 2.0);
 
-    // 音效默认留空 = 不播放
-    KvGetString(kv, "RotateSound1", g_Knives[idx].sRotateSound1, PLATFORM_MAX_PATH, "");
-    KvGetString(kv, "RotateSound2", g_Knives[idx].sRotateSound2, PLATFORM_MAX_PATH, "");
-    KvGetString(kv, "RotateSound3", g_Knives[idx].sRotateSound3, PLATFORM_MAX_PATH, "");
-    KvGetString(kv, "RightRotateSound", g_Knives[idx].sRightRotateSound, PLATFORM_MAX_PATH, "");
+    // 转刀音效: "帧号:路径" = 动画第N帧开始播放; "路径"(无冒号) = 第0帧立即播放; 留空 = 不播放
+    char sSoundValue[PLATFORM_MAX_PATH];
+    char sSoundPath[PLATFORM_MAX_PATH];
+
+    KvGetString(kv, "RotateSound1", sSoundValue, sizeof(sSoundValue), "");
+    ParseRotateSoundValue(sSoundValue, g_Knives[idx].iRotateFrame[0], sSoundPath, sizeof(sSoundPath));
+    strcopy(g_Knives[idx].sRotateSound1, PLATFORM_MAX_PATH, sSoundPath);
+
+    KvGetString(kv, "RotateSound2", sSoundValue, sizeof(sSoundValue), "");
+    ParseRotateSoundValue(sSoundValue, g_Knives[idx].iRotateFrame[1], sSoundPath, sizeof(sSoundPath));
+    strcopy(g_Knives[idx].sRotateSound2, PLATFORM_MAX_PATH, sSoundPath);
+
+    KvGetString(kv, "RotateSound3", sSoundValue, sizeof(sSoundValue), "");
+    ParseRotateSoundValue(sSoundValue, g_Knives[idx].iRotateFrame[2], sSoundPath, sizeof(sSoundPath));
+    strcopy(g_Knives[idx].sRotateSound3, PLATFORM_MAX_PATH, sSoundPath);
+
+    KvGetString(kv, "RightRotateSound", sSoundValue, sizeof(sSoundValue), "");
+    ParseRotateSoundValue(sSoundValue, g_Knives[idx].iRightRotateFrame, sSoundPath, sizeof(sSoundPath));
+    strcopy(g_Knives[idx].sRightRotateSound, PLATFORM_MAX_PATH, sSoundPath);
     KvGetString(kv, "HitSound", g_Knives[idx].sHitSound, PLATFORM_MAX_PATH, "");
     KvGetString(kv, "KillSound", g_Knives[idx].sKillSound, PLATFORM_MAX_PATH, "");
     KvGetString(kv, "HeadshotSound", g_Knives[idx].sHeadshotSound, PLATFORM_MAX_PATH, "");
@@ -638,6 +665,38 @@ void LoadKnifeGroup(Handle kv, const char[] groupName)
     g_iKnifeCount++;
 
     PrintToServer("[H-AN] DeltaForceKnife 组 [%s] -> %s", groupName, sClassName);
+}
+
+// ============================================================================
+// 解析转刀音效值: "帧号:路径" = 动画第N帧开始播放
+//                 "路径"(无冒号)  = 第0帧立即播放
+// ============================================================================
+void ParseRotateSoundValue(const char[] value, int &frame, char[] path, int pathLen)
+{
+    char sFrame[16];
+
+    // SplitString: sFrame = 冒号前部分, 返回值 = 冒号后起始下标(-1 = 无冒号)
+    int pos = SplitString(value, ":", sFrame, sizeof(sFrame));
+    if (pos == -1)
+    {
+        // 无冒号 = 纯路径, 第0帧立即播放
+        frame = 0;
+        strcopy(path, pathLen, value);
+        return;
+    }
+
+    frame = StringToInt(sFrame);
+    if (frame < 0)
+        frame = 0;
+
+    // 冒号之后的部分即路径
+    int i = 0;
+    while (value[pos + i] != '\0' && i < pathLen - 1)
+    {
+        path[i] = value[pos + i];
+        i++;
+    }
+    path[i] = '\0';
 }
 
 // ============================================================
@@ -661,21 +720,23 @@ void WriteDefaultConfig(const char[] path)
     WriteFileLine(file, "// IdleTimeout            连续攻击间隔超过此时间后, 左键连招重新从第一刀开始");
     WriteFileLine(file, "//");
     WriteFileLine(file, "// LeftSequence1~3        左键三刀的 QC 动画序列号");
-    WriteFileLine(file, "// LeftFrames1~3          左键三刀的动画帧数, 同时决定旋转音延迟(帧数/66秒)");
+    WriteFileLine(file, "// LeftFrames1~3          左键三刀的动画总帧数(传给武器系统, 动画持续时长 = 帧数/30 秒, 不参与音效计算)");
+    WriteFileLine(file, "// LeftFps1~3             左键三刀动画的 fps, 转刀音效帧号换算用(不填默认 66)");
     WriteFileLine(file, "// LeftInterval1          左键 第三刀 -> 第一刀 的攻击间隔");
     WriteFileLine(file, "// LeftInterval2          左键 第一刀 -> 第二刀 的攻击间隔");
     WriteFileLine(file, "// LeftInterval3          左键 第二刀 -> 第三刀 的攻击间隔");
     WriteFileLine(file, "// LeftDamage1~3          左键三刀基础伤害");
     WriteFileLine(file, "//");
     WriteFileLine(file, "// RightSequence          右键 QC 动画序列号, 逗号分隔: 填1个=固定动画, 填多个=按顺序交替循环(如 \"8,6\")");
-    WriteFileLine(file, "// RightFrames            右键动画帧数");
+    WriteFileLine(file, "// RightFrames            右键动画总帧数(传给武器系统, 不参与音效计算)");
+    WriteFileLine(file, "// RightFps               右键动画 fps(不填默认 66)");
     WriteFileLine(file, "// RightInterval          右键 -> 下一次右键 的攻击间隔");
     WriteFileLine(file, "// RightDamage            右键基础伤害");
     WriteFileLine(file, "//");
     WriteFileLine(file, "// HeadshotMultiplier     爆头伤害倍率");
     WriteFileLine(file, "//");
-    WriteFileLine(file, "// RotateSound1~3         左键各刀攻击后的延迟旋转音效(留空 = 不播放)");
-    WriteFileLine(file, "// RightRotateSound       右键攻击后的延迟旋转音效(留空 = 不播放)");
+    WriteFileLine(file, "// RotateSound1~3         左键各刀转刀音效, 格式 \"帧号:路径\" = 动画第N帧开始播放(不带帧号 = 第0帧立即播放, 留空 = 不播放)");
+    WriteFileLine(file, "// RightRotateSound       右键转刀音效, 格式同 RotateSound1~3");
     WriteFileLine(file, "// HitSound               普通命中音效(留空 = 不播放)");
     WriteFileLine(file, "// KillSound              普通击杀音效(留空 = 不播放)");
     WriteFileLine(file, "// HeadshotSound          爆头击杀音效(留空 = 不播放)");
@@ -708,10 +769,14 @@ void WriteDefaultConfig(const char[] path)
     WriteFileLine(file, "        \"LeftSequence2\"          \"5\"");
     WriteFileLine(file, "        \"LeftSequence3\"          \"6\"");
 
-    WriteFileLine(file, "        // 左键三刀动画帧数");
+    WriteFileLine(file, "        // 左键三刀动画总帧数(只管动画时长, 不参与音效)");
     WriteFileLine(file, "        \"LeftFrames1\"            \"40\"");
     WriteFileLine(file, "        \"LeftFrames2\"            \"60\"");
     WriteFileLine(file, "        \"LeftFrames3\"            \"61\"");
+    WriteFileLine(file, "        // 左键三刀动画 fps(转刀音效帧号换算用, 不填默认 66)");
+    WriteFileLine(file, "        // \"LeftFps1\"              \"66\"");
+    WriteFileLine(file, "        // \"LeftFps2\"              \"66\"");
+    WriteFileLine(file, "        // \"LeftFps3\"              \"66\"");
 
     WriteFileLine(file, "        // 左键攻击间隔");
     WriteFileLine(file, "        \"LeftInterval1\"          \"0.6\"    // 第三刀 -> 第一刀");
@@ -726,17 +791,18 @@ void WriteDefaultConfig(const char[] path)
     WriteFileLine(file, "        // 右键: 先 8 后 6 交替(只填一个则为固定动画)");
     WriteFileLine(file, "        \"RightSequence\"          \"8,6\"");
     WriteFileLine(file, "        \"RightFrames\"            \"61\"");
+    WriteFileLine(file, "        // \"RightFps\"              \"66\"");
     WriteFileLine(file, "        \"RightInterval\"          \"0.6\"");
     WriteFileLine(file, "        \"RightDamage\"            \"60.0\"");
 
     WriteFileLine(file, "        // 爆头伤害倍率");
     WriteFileLine(file, "        \"HeadshotMultiplier\"     \"2.0\"");
 
-    WriteFileLine(file, "        // 各刀攻击后的延迟旋转音效");
-    WriteFileLine(file, "        \"RotateSound1\"           \"weapons/beijixing/beijixing_rotate_1.wav\"");
-    WriteFileLine(file, "        \"RotateSound2\"           \"weapons/beijixing/beijixing_rotate_2.wav\"");
-    WriteFileLine(file, "        \"RotateSound3\"           \"weapons/beijixing/beijixing_rotate_3.wav\"");
-    WriteFileLine(file, "        \"RightRotateSound\"       \"weapons/beijixing/beijixing_rotate_3.wav\"");
+    WriteFileLine(file, "        // 转刀音效: \"帧号:路径\" = 动画第N帧开始播放(不带帧号 = 第0帧立即播放)");
+    WriteFileLine(file, "        \"RotateSound1\"           \"40:weapons/beijixing/beijixing_rotate_1.wav\"");
+    WriteFileLine(file, "        \"RotateSound2\"           \"60:weapons/beijixing/beijixing_rotate_2.wav\"");
+    WriteFileLine(file, "        \"RotateSound3\"           \"61:weapons/beijixing/beijixing_rotate_3.wav\"");
+    WriteFileLine(file, "        \"RightRotateSound\"       \"61:weapons/beijixing/beijixing_rotate_3.wav\"");
 
     WriteFileLine(file, "        // 命中/击杀音效");
     WriteFileLine(file, "        \"HitSound\"               \"weapons/beijixing/hit.wav\"");
@@ -757,9 +823,12 @@ void WriteDefaultConfig(const char[] path)
     WriteFileLine(file, "    //     \"LeftSequence1\"          \"4\"");
     WriteFileLine(file, "    //     \"LeftSequence2\"          \"5\"");
     WriteFileLine(file, "    //     \"LeftSequence3\"          \"6\"");
-    WriteFileLine(file, "    //     \"LeftFrames1\"            \"40\"");
+    WriteFileLine(file, "    //     \"LeftFrames1\"            \"40\"     // 动画总帧数(只管动画时长)");
     WriteFileLine(file, "    //     \"LeftFrames2\"            \"60\"");
     WriteFileLine(file, "    //     \"LeftFrames3\"            \"61\"");
+    WriteFileLine(file, "    //     \"LeftFps1\"               \"64\"     // 动画fps(转刀音效帧号换算, 不填默认66)");
+    WriteFileLine(file, "    //     \"LeftFps2\"               \"71\"");
+    WriteFileLine(file, "    //     \"LeftFps3\"               \"64\"");
     WriteFileLine(file, "    //     \"LeftInterval1\"          \"0.6\"    // 第三刀 -> 第一刀");
     WriteFileLine(file, "    //     \"LeftInterval2\"          \"0.3\"    // 第一刀 -> 第二刀");
     WriteFileLine(file, "    //     \"LeftInterval3\"          \"0.4\"    // 第二刀 -> 第三刀");
@@ -767,14 +836,15 @@ void WriteDefaultConfig(const char[] path)
     WriteFileLine(file, "    //     \"LeftDamage2\"            \"30.0\"");
     WriteFileLine(file, "    //     \"LeftDamage3\"            \"42.0\"");
     WriteFileLine(file, "    //     \"RightSequence\"          \"8\"");
-    WriteFileLine(file, "    //     \"RightFrames\"            \"61\"");
+    WriteFileLine(file, "    //     \"RightFrames\"            \"61\"     // 动画总帧数");
+    WriteFileLine(file, "    //     \"RightFps\"               \"64\"     // 不填默认66");
     WriteFileLine(file, "    //     \"RightInterval\"          \"0.6\"");
     WriteFileLine(file, "    //     \"RightDamage\"            \"60.0\"");
     WriteFileLine(file, "    //     \"HeadshotMultiplier\"     \"2.0\"");
-    WriteFileLine(file, "    //     \"RotateSound1\"           \"weapons/mynewknife/rotate_1.wav\"");
-    WriteFileLine(file, "    //     \"RotateSound2\"           \"weapons/mynewknife/rotate_2.wav\"");
-    WriteFileLine(file, "    //     \"RotateSound3\"           \"weapons/mynewknife/rotate_3.wav\"");
-    WriteFileLine(file, "    //     \"RightRotateSound\"       \"weapons/mynewknife/rotate_3.wav\"");
+    WriteFileLine(file, "    //     \"RotateSound1\"           \"40:weapons/mynewknife/rotate_1.wav\"   // 动画第40帧开始播放");
+    WriteFileLine(file, "    //     \"RotateSound2\"           \"40:weapons/mynewknife/rotate_2.wav\"");
+    WriteFileLine(file, "    //     \"RotateSound3\"           \"55:weapons/mynewknife/rotate_3.wav\"");
+    WriteFileLine(file, "    //     \"RightRotateSound\"       \"40:weapons/mynewknife/rotate_3.wav\"");
     WriteFileLine(file, "    //     \"HitSound\"               \"weapons/mynewknife/hit.wav\"");
     WriteFileLine(file, "    //     \"KillSound\"              \"weapons/mynewknife/kill.wav\"");
     WriteFileLine(file, "    //     \"HeadshotSound\"          \"weapons/mynewknife/headshot.wav\"");

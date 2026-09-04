@@ -29,7 +29,7 @@ It evolved from the Polaris-exclusive plugin `[H-AN-CSS]Polaris Knife`: everythi
 - **Right-click heavy attack**: supports a single fixed animation, or multiple comma-separated animations played in alternating order (Polaris uses `8,6`)
 - **Full damage override**: the weapon's native damage is ignored; damage is recalculated from the group's base damage + headshot multiplier
 - **Three sound systems**:
-  - **Delayed rotate sound** after each attack (delay = animation frames ÷ 66 seconds, floored to 0.1s; a new attack automatically cancels the previous attack's pending rotate sound)
+  - **Delayed blade-rotate sound** after each attack (configured as `frame:path` — plays when the animation reaches that frame; delay = frame ÷ animation fps, exact with no rounding; a new attack automatically cancels the previous attack's pending sound)
   - **Hit sound** (attacker only)
   - **Kill sound**: automatically distinguishes between **headshot kill sound** and **normal kill sound** based on the last registered hitgroup
   - Any sound path can be **left empty to disable that sound**
@@ -86,18 +86,20 @@ The config file uses KeyValues format — one group per knife, group names are a
 | `ClassName` | **Required.** Weapon entity classname | none (group is skipped if missing) |
 | `IdleTimeout` | If the gap between two attacks exceeds this many seconds, the left combo restarts from the first hit | `2.0` |
 | `LeftSequence1~3` | QC animation sequence numbers of the three left-click hits | `4` `5` `6` |
-| `LeftFrames1~3` | Animation frame counts of the three left-click hits; also determines the rotate sound delay = frames ÷ 66 seconds | `40` `60` `61` |
+| `LeftFrames1~3` | Total animation frame counts of the three left-click hits (passed to the weapon system, state duration = frames ÷ 30 s; not used for sounds) | `40` `60` `61` |
+| `LeftFps1~3` | Animation fps of each left-click hit, used for the rotate-sound frame conversion | `66` |
 | `LeftInterval1` | Attack interval of left click **3rd hit → 1st hit** (seconds) | `0.6` |
 | `LeftInterval2` | Attack interval of left click **1st hit → 2nd hit** (seconds) | `0.3` |
 | `LeftInterval3` | Attack interval of left click **2nd hit → 3rd hit** (seconds) | `0.4` |
 | `LeftDamage1~3` | Base damage of the three left-click hits | `30` `30` `42` |
 | `RightSequence` | Right-click QC animation sequence numbers, **comma-separated**: one value = fixed animation; multiple values = played in alternating order | `8,6` |
-| `RightFrames` | Right-click animation frame count | `61` |
+| `RightFrames` | Total animation frame count of the right-click attack (passed to the weapon system; not used for sounds) | `61` |
+| `RightFps` | Right-click animation fps, used for the rotate-sound frame conversion | `66` |
 | `RightInterval` | Attack interval from one right click to the next (seconds) | `0.6` |
 | `RightDamage` | Base damage of the right-click heavy attack | `60` |
 | `HeadshotMultiplier` | Headshot damage multiplier | `2.0` |
-| `RotateSound1~3` | Delayed rotate sound after each left-click hit (empty = not played) | empty |
-| `RightRotateSound` | Delayed rotate sound after the right-click attack (empty = not played) | empty |
+| `RotateSound1~3` | Blade-rotate sound of each left-click hit, format **`frame:path`** = starts playing at frame N of the animation (no frame = plays immediately at frame 0; empty = not played) | empty |
+| `RightRotateSound` | Right-click blade-rotate sound, same format as `RotateSound1~3` | empty |
 | `HitSound` | Normal hit sound path (empty = not played) | empty |
 | `KillSound` | Normal kill sound path (empty = not played) | empty |
 | `HeadshotSound` | Headshot kill sound path (empty = not played) | empty |
@@ -134,10 +136,10 @@ The config file uses KeyValues format — one group per knife, group names are a
 
         "HeadshotMultiplier"    "2.0"
 
-        "RotateSound1"          "weapons/beijixing/beijixing_rotate_1.wav"
-        "RotateSound2"          "weapons/beijixing/beijixing_rotate_2.wav"
-        "RotateSound3"          "weapons/beijixing/beijixing_rotate_3.wav"
-        "RightRotateSound"      "weapons/beijixing/beijixing_rotate_3.wav"
+        "RotateSound1"          "40:weapons/beijixing/beijixing_rotate_1.wav"
+        "RotateSound2"          "60:weapons/beijixing/beijixing_rotate_2.wav"
+        "RotateSound3"          "61:weapons/beijixing/beijixing_rotate_3.wav"
+        "RightRotateSound"      "61:weapons/beijixing/beijixing_rotate_3.wav"
 
         "HitSound"              "weapons/beijixing/hit.wav"
         "KillSound"             "weapons/beijixing/kill.wav"
@@ -159,6 +161,8 @@ The config file uses KeyValues format — one group per knife, group names are a
     "LeftSequence1"     "4"
     "LeftSequence2"     "5"
     "LeftSequence3"     "6"
+    "LeftFps1"          "64"     // animation fps (defaults to 66 if omitted)
+    "RotateSound1"      "40:weapons/mynewknife/rotate_1.wav"   // starts playing at frame 40
     "RightSequence"     "8"      // a single value = fixed heavy attack animation
     // ...fill in the rest as needed; missing keys use the Polaris defaults
 }
@@ -168,7 +172,7 @@ The config file uses KeyValues format — one group per knife, group names are a
 
 - A TempEnt hook on `PlayerAnimEvent` captures the player's right-click (`m_iEvent=0`) / left-click (`m_iEvent=1`) attack animation events, advances the combo state machine, rewrites `m_flNextPrimaryAttack` / `m_flNextSecondaryAttack` / `m_flNextAttack` to control attack speed, and calls HanWeaponSystem's `Han_SetClientCustomAnim` to play the custom animation
 - `SDKHook_TraceAttack` takes over damage: a ray is traced from the attacker's viewpoint against the victim to obtain the hitgroup; head hits (1) are multiplied by the headshot multiplier, and a missed ray (0) also counts as a headshot as a fallback (identical to Polaris behavior)
-- Delayed rotate sounds are played through timers carrying an attack ID; a new attack invalidates the previous attack's pending rotate sound
+- Blade-rotate sounds are played through timers carrying an attack ID; the delay = configured rotate frame ÷ animation fps (exact conversion, no rounding); a new attack invalidates the previous attack's pending sound
 - The hitgroup is written into the `hitgroup` field of the `player_hurt` event and recorded for the kill sound decision
 
 ## Behavior Details
