@@ -12,7 +12,7 @@ public Plugin myinfo =
     name = "[H-AN]CS起源三角洲刀具 Delta Force Knife",
     author = "华仔 H-AN",
     description = "华仔 H-AN 三角洲风格刀具通用驱动插件(北极星等, 组配置驱动)",
-    version = "1.1",
+    version = "1.4",
     url = "[H-AN]武器系统三角洲, QQ群107866133, github https://github.com/H-AN"
 };
 
@@ -60,6 +60,11 @@ enum struct DeltaKnifeCfg
     char sRotateSound3[PLATFORM_MAX_PATH];      // 左键第三刀
     int iRightRotateFrame;                      // 右键转刀起始帧(对应 RightRotateSound 的帧号部分)
     char sRightRotateSound[PLATFORM_MAX_PATH];  // 右键转刀音效 "帧号:路径" 或 "路径"(留空不播)
+
+    int iDrawSeq2;                              // 特殊切换 QC 序列号(-1 = 双切换功能关闭)
+    int iDrawFrames2;                           // 特殊切换动画总帧数(状态时长 = 帧数/30, 须覆盖整个 draw)
+    char sDrawSound1[PLATFORM_MAX_PATH];        // 普通切换音效(走同步 draw 时播放, 留空不播)
+    char sDrawSound2[PLATFORM_MAX_PATH];        // 特殊切换音效(走特殊 draw 时播放, 留空不播)
 
     char sHitSound[PLATFORM_MAX_PATH];          // 普通命中音(留空不播)
     char sKillSound[PLATFORM_MAX_PATH];         // 普通击杀音(留空不播)
@@ -109,6 +114,85 @@ public void OnMapStart()
 public void OnClientPutInServer(int client)
 {
     SDKHook(client, SDKHook_TraceAttack, TraceAttack);
+
+    // 双切换动画检测: 与武器系统 switchsound 同源同款钩子(切换 + 拾取/出生都算掏出)
+    SDKHook(client, SDKHook_WeaponSwitch, OnKnifeSwitch);
+    SDKHook(client, SDKHook_WeaponEquip, OnKnifeSwitch);
+}
+
+// ============================================================================
+// 掏刀检测(武器切换/拾取): 推迟一帧等武器系统完成 VM 换模后再处理
+// ============================================================================
+public Action OnKnifeSwitch(int client, int weapon)
+{
+    if (!g_bEnable)
+        return Plugin_Continue;
+
+    if (client <= 0 || client > MaxClients || !IsClientInGame(client) || !IsPlayerAlive(client))
+        return Plugin_Continue;
+
+    // 设计: 任何武器切换都重置连招状态(含作废未播的延迟音效/延迟动画),
+    // 切走再切回三角洲刀后必定从第一刀开始
+    ResetPlayerState(client);
+
+    DataPack pack = new DataPack();
+    pack.WriteCell(GetClientUserId(client));
+
+    CreateTimer(0.0, Timer_KnifeDraw, pack, TIMER_FLAG_NO_MAPCHANGE | TIMER_DATA_HNDL_CLOSE);
+
+    return Plugin_Continue;
+}
+
+// ============================================================================
+// 掏刀处理: 当前武器为启用双切换的刀时, 50% 普通切换(不干预动画, 播普通音效),
+// 50% 特殊切换(自定义动画压过同步 + 播特殊音效)
+// ============================================================================
+public Action Timer_KnifeDraw(Handle timer, DataPack pack)
+{
+    pack.Reset();
+
+    int client = GetClientOfUserId(pack.ReadCell());
+
+    if (client <= 0 ||
+        client > MaxClients ||
+        !IsClientInGame(client) ||
+        !IsPlayerAlive(client))
+    {
+        return Plugin_Stop;
+    }
+
+    int active = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
+    if (active <= 0 || !IsValidEntity(active))
+        return Plugin_Stop;
+
+    int idx = GetKnifeIndexByWeapon(active);
+    if (idx == -1 || g_Knives[idx].iDrawSeq2 == -1)
+        return Plugin_Stop;
+
+    // 50/50: 0 = 普通切换, 1 = 特殊切换
+    if (GetRandomInt(0, 1) == 0)
+    {
+        // 普通切换: 动画不干预(武器系统同步照常)
+        if (g_bSoundEnable && strlen(g_Knives[idx].sDrawSound1) > 0)
+        {
+            EmitSoundToAll(g_Knives[idx].sDrawSound1, client, SNDCHAN_WEAPON, SNDLEVEL_NORMAL);
+        }
+        return Plugin_Stop;
+    }
+
+    // 特殊切换: 期间玩家已出刀(攻击动画在播) → 攻击优先, 放弃特殊切换
+    if (Han_IsClientCustomAnim(client))
+        return Plugin_Stop;
+
+    // 特殊切换动画(带同序列重播保护, attackToken=0 = 掏刀路径)
+    StartCustomAnimSafe(client, g_Knives[idx].iDrawSeq2, g_Knives[idx].iDrawFrames2, 0);
+
+    if (g_bSoundEnable && strlen(g_Knives[idx].sDrawSound2) > 0)
+    {
+        EmitSoundToAll(g_Knives[idx].sDrawSound2, client, SNDCHAN_WEAPON, SNDLEVEL_NORMAL);
+    }
+
+    return Plugin_Stop;
 }
 
 public void OnClientDisconnect(int client)
@@ -219,17 +303,91 @@ void StopKnifeSounds(int client, int idx)
 void ForceAttackAnimation(int client, int sequence, int frames)
 {
     int vm0 = GetClientViewModel(client, 0);
-    int vm1 = GetClientViewModel(client, 1);
 
     if (vm0 > 0 && IsValidEntity(vm0))
     {
         SetEntProp(vm0, Prop_Send, "m_nSequence", 0);
     }
 
-    if (vm1 > 0 && IsValidEntity(vm1))
+    // 调用方(EventPlayerAnim)已递增攻击计数, 作为本次启动的作废标识
+    StartCustomAnimSafe(client, sequence, frames, g_iAttackID[client]);
+}
+
+// ============================================================================
+// 启动自定义动画(带同序列重播保护, 出刀/掏刀共用)
+// 引擎对同一 VM 重复设置同一序列号不会重播(cycle 不归零), 上一次动画状态结束
+// 前后 VM1 残留同序列时, 再次启动同序列动画会被吞(闲置重置/连续掏刀时出现)。
+// 同序列时: 先干净结束动画状态并翻转 VM1 到 idle 清 cycle, 推迟一帧再启动,
+// 保证客户端必看到一次序列变化, 强制引擎重启 cycle。
+// attackToken: 出刀路径传攻击计数(被更新的出刀作废), 掏刀路径传 0(不作废,
+//              改由"攻击动画已在播则放弃"判断保证攻击优先)。
+// ============================================================================
+void StartCustomAnimSafe(int client, int sequence, int frames, int attackToken)
+{
+    int vm1 = GetClientViewModel(client, 1);
+
+    if (vm1 <= 0 || !IsValidEntity(vm1))
+        return;
+
+    if (GetEntProp(vm1, Prop_Send, "m_nSequence") != sequence)
     {
         Han_SetClientCustomAnim(client, sequence, frames, true, true);
+        return;
     }
+
+    Han_StopClientCustomAnim(client);
+
+    vm1 = GetClientViewModel(client, 1);
+    if (vm1 > 0 && IsValidEntity(vm1))
+    {
+        SetEntProp(vm1, Prop_Send, "m_nSequence", 0);
+        SetEntPropFloat(vm1, Prop_Data, "m_flCycle", 0.0);
+    }
+
+    //PrintToServer("[H-AN] DeltaForceKnife 同序列重播保护触发: %N seq %d", client, sequence);
+
+    DataPack pack = new DataPack();
+    pack.WriteCell(client);
+    pack.WriteCell(attackToken);
+    pack.WriteCell(sequence);
+    pack.WriteCell(frames);
+
+    CreateTimer(0.0, Timer_StartAnim, pack, TIMER_FLAG_NO_MAPCHANGE | TIMER_DATA_HNDL_CLOSE);
+}
+
+// 下一帧启动动画(同序列重播保护的后半段)
+public Action Timer_StartAnim(Handle timer, DataPack pack)
+{
+    pack.Reset();
+
+    int client = pack.ReadCell();
+    int attackToken = pack.ReadCell();
+    int sequence = pack.ReadCell();
+    int frames = pack.ReadCell();
+
+    if (client <= 0 ||
+        client > MaxClients ||
+        !IsClientInGame(client) ||
+        !IsPlayerAlive(client))
+    {
+        return Plugin_Stop;
+    }
+
+    // 出刀路径: 期间有更新的出刀则本次启动作废
+    if (attackToken != 0 && attackToken != g_iAttackID[client])
+    {
+        return Plugin_Stop;
+    }
+
+    // 掏刀路径: 期间玩家已出刀(攻击动画在播) → 攻击优先, 放弃本次特殊切换
+    if (attackToken == 0 && Han_IsClientCustomAnim(client))
+    {
+        return Plugin_Stop;
+    }
+
+    Han_SetClientCustomAnim(client, sequence, frames, true, true);
+
+    return Plugin_Stop;
 }
 
 // ======================== 攻击事件处理 ========================
@@ -657,6 +815,29 @@ void LoadKnifeGroup(Handle kv, const char[] groupName)
     KvGetString(kv, "RightRotateSound", sSoundValue, sizeof(sSoundValue), "");
     ParseRotateSoundValue(sSoundValue, g_Knives[idx].iRightRotateFrame, sSoundPath, sizeof(sSoundPath));
     strcopy(g_Knives[idx].sRightRotateSound, PLATFORM_MAX_PATH, sSoundPath);
+
+    // 双切换动画(可选): 不填 DrawSequence2 = 功能关闭, 掏刀行为与现在完全一致
+    g_Knives[idx].iDrawSeq2 = -1;
+    g_Knives[idx].iDrawFrames2 = 0;
+
+    int drawSeq2 = KvGetNum(kv, "DrawSequence2", -1);
+    if (drawSeq2 >= 0)
+    {
+        int drawFrames2 = KvGetNum(kv, "DrawFrames2", -1);
+        if (drawFrames2 <= 0)
+        {
+            LogError("[H-AN] DeltaForceKnife 组 [%s] 填了 DrawSequence2 但缺少有效 DrawFrames2, 双切换未启用", groupName);
+        }
+        else
+        {
+            g_Knives[idx].iDrawSeq2 = drawSeq2;
+            g_Knives[idx].iDrawFrames2 = drawFrames2;
+        }
+    }
+
+    KvGetString(kv, "DrawSound1", g_Knives[idx].sDrawSound1, PLATFORM_MAX_PATH, "");
+    KvGetString(kv, "DrawSound2", g_Knives[idx].sDrawSound2, PLATFORM_MAX_PATH, "");
+
     KvGetString(kv, "HitSound", g_Knives[idx].sHitSound, PLATFORM_MAX_PATH, "");
     KvGetString(kv, "KillSound", g_Knives[idx].sKillSound, PLATFORM_MAX_PATH, "");
     KvGetString(kv, "HeadshotSound", g_Knives[idx].sHeadshotSound, PLATFORM_MAX_PATH, "");
@@ -737,6 +918,12 @@ void WriteDefaultConfig(const char[] path)
     WriteFileLine(file, "//");
     WriteFileLine(file, "// RotateSound1~3         左键各刀转刀音效, 格式 \"帧号:路径\" = 动画第N帧开始播放(不带帧号 = 第0帧立即播放, 留空 = 不播放)");
     WriteFileLine(file, "// RightRotateSound       右键转刀音效, 格式同 RotateSound1~3");
+    WriteFileLine(file, "//");
+    WriteFileLine(file, "// DrawSequence2          特殊切换的 QC 序列号(填了才启用双切换动画: 50% 播此序列, 50% 走原版同步 draw)");
+    WriteFileLine(file, "// DrawFrames2            特殊切换动画总帧数(状态时长 = 帧数/30, 必须覆盖整个切换动画)");
+    WriteFileLine(file, "// DrawSound1             普通切换音效(走同步 draw 时播放, 留空 = 不播放)");
+    WriteFileLine(file, "// DrawSound2             特殊切换音效(走特殊 draw 时播放, 留空 = 不播放)");
+    WriteFileLine(file, "// 注意: 启用双切换时, 该武器在武器系统配置内的 switchsound 必须留空, 否则会叠加播放固定切换音效");
     WriteFileLine(file, "// HitSound               普通命中音效(留空 = 不播放)");
     WriteFileLine(file, "// KillSound              普通击杀音效(留空 = 不播放)");
     WriteFileLine(file, "// HeadshotSound          爆头击杀音效(留空 = 不播放)");
@@ -845,6 +1032,10 @@ void WriteDefaultConfig(const char[] path)
     WriteFileLine(file, "    //     \"RotateSound2\"           \"40:weapons/mynewknife/rotate_2.wav\"");
     WriteFileLine(file, "    //     \"RotateSound3\"           \"55:weapons/mynewknife/rotate_3.wav\"");
     WriteFileLine(file, "    //     \"RightRotateSound\"       \"40:weapons/mynewknife/rotate_3.wav\"");
+    WriteFileLine(file, "    //     \"DrawSequence2\"          \"12\"     // 特殊切换序列号(填了才启用双切换)");
+    WriteFileLine(file, "    //     \"DrawFrames2\"            \"80\"     // 特殊切换动画总帧数");
+    WriteFileLine(file, "    //     \"DrawSound1\"             \"weapons/mynewknife/draw_normal.wav\"");
+    WriteFileLine(file, "    //     \"DrawSound2\"             \"weapons/mynewknife/draw_special.wav\"");
     WriteFileLine(file, "    //     \"HitSound\"               \"weapons/mynewknife/hit.wav\"");
     WriteFileLine(file, "    //     \"KillSound\"              \"weapons/mynewknife/kill.wav\"");
     WriteFileLine(file, "    //     \"HeadshotSound\"          \"weapons/mynewknife/headshot.wav\"");
@@ -864,6 +1055,8 @@ void PrecacheSounds()
         PrecacheSoundPath(g_Knives[i].sRotateSound2);
         PrecacheSoundPath(g_Knives[i].sRotateSound3);
         PrecacheSoundPath(g_Knives[i].sRightRotateSound);
+        PrecacheSoundPath(g_Knives[i].sDrawSound1);
+        PrecacheSoundPath(g_Knives[i].sDrawSound2);
         PrecacheSoundPath(g_Knives[i].sHitSound);
         PrecacheSoundPath(g_Knives[i].sKillSound);
         PrecacheSoundPath(g_Knives[i].sHeadshotSound);

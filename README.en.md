@@ -34,6 +34,7 @@ It evolved from the Polaris-exclusive plugin `[H-AN-CSS]Polaris Knife`: everythi
   - **Kill sound**: automatically distinguishes between **headshot kill sound** and **normal kill sound** based on the last registered hitgroup
   - Any sound path can be **left empty to disable that sound**
 - **Animation driver**: played through the HanWeaponSystem dual-ViewModel custom animation API (sequence 0 forced on VM0 + custom sequence on VM1)
+- **Dual draw animation** (optional): every weapon draw has a 50% chance to play the vanilla synced draw and a 50% chance to play the configured special draw sequence, each with its own draw sound; attacks take priority and interrupt the draw animation normally
 - **Config hot reload**: reload instantly with an admin command, no map change or restart needed
 
 ## Requirements
@@ -100,6 +101,10 @@ The config file uses KeyValues format — one group per knife, group names are a
 | `HeadshotMultiplier` | Headshot damage multiplier | `2.0` |
 | `RotateSound1~3` | Blade-rotate sound of each left-click hit, format **`frame:path`** = starts playing at frame N of the animation (no frame = plays immediately at frame 0; empty = not played) | empty |
 | `RightRotateSound` | Right-click blade-rotate sound, same format as `RotateSound1~3` | empty |
+| `DrawSequence2` | QC sequence number of the special draw. **Filling this enables the dual draw animation**: every draw has a 50% chance to play the vanilla synced draw and a 50% chance to play this sequence; not filled = draws are not touched | empty |
+| `DrawFrames2` | Total frame count of the special draw animation (state duration = frames ÷ 30 s, must cover the whole draw) | none |
+| `DrawSound1` | Normal draw sound (played when the synced draw plays; empty = not played) | empty |
+| `DrawSound2` | Special draw sound (played when the special draw plays; empty = not played) | empty |
 | `HitSound` | Normal hit sound path (empty = not played) | empty |
 | `KillSound` | Normal kill sound path (empty = not played) | empty |
 | `HeadshotSound` | Headshot kill sound path (empty = not played) | empty |
@@ -178,8 +183,10 @@ The config file uses KeyValues format — one group per knife, group names are a
 ## Behavior Details
 
 - **The first hit after an idle period does not get the plugin interval** — its attack speed is decided by the weapon itself; from the second hit on, the group config takes over
+- When the dual draw animation is enabled, the **`switchsound` of that weapon must be left empty in the weapon system's config**, otherwise every draw would additionally play a fixed switch sound on top
+- **The normal draw already carries the original switch sound** (baked into the original draw animation's sound event, processed by the sound-replacement hook), so `DrawSound1` should usually stay empty; the special draw animation has no embedded sound and gets its sound from `DrawSound2`
 - The kill sound uses the "last registered hitgroup"; a lethal hit does not play the hit sound (the kill sound plays instead)
-- Switching between multiple Delta Force knives resets the combo back to the first hit
+- **Any weapon switch resets the combo** (switching away, back, or picking up) — drawing a Delta Force knife always starts from the first hit; switching also cancels pending blade-rotate sounds
 - All sounds use the `SNDCHAN_STATIC` channel; rotate sounds are audible to everyone, hit/kill sounds only to the attacker
 - Up to 32 knife groups and up to 4 right-click animation entries per group
 
