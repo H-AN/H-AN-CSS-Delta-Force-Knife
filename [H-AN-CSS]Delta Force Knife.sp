@@ -12,11 +12,13 @@ public Plugin myinfo =
     name = "[H-AN]CS起源三角洲刀具 Delta Force Knife",
     author = "华仔 H-AN",
     description = "华仔 H-AN 三角洲风格刀具通用驱动插件(北极星等, 组配置驱动)",
-    version = "1.4",
+    version = "1.7",
     url = "[H-AN]武器系统三角洲, QQ群107866133, github https://github.com/H-AN"
 };
 
 #define SNDCHAN_KNIFE SNDCHAN_STATIC
+
+#define EF_NODRAW 32     // 引擎效果位: 隐藏渲染(与武器系统/QuickMelee 使用的值一致)
 
 // ======================== 常量 ========================
 #define MAX_DFKNIVES     32      // 最多支持的刀具组数量
@@ -27,6 +29,7 @@ public Plugin myinfo =
 // 组参数全部走 configs/DeltaForceKnife.cfg, 只有总开关和音效开关走 CVar
 ConVar g_hEnableCvar;
 ConVar g_hSoundEnableCvar;
+ConVar g_hOldWeaponFix;
 
 bool g_bEnable;
 bool g_bSoundEnable;
@@ -102,6 +105,18 @@ public void OnAllPluginsLoaded()
     if (LibraryExists("HanWeaponSystem"))
     {
         PrintToServer("[H-AN] HanWeaponSystem 已加载, Delta Force Knife API 就绪");
+
+        // 获取 HanWeaponSystem 的旧武器修复 Cvar
+        g_hOldWeaponFix = FindConVar("han_oldweaponfix");
+
+        if (g_hOldWeaponFix != null)
+        {
+            PrintToServer("[H-AN] 已获取 han_oldweaponfix");
+        }
+        else
+        {
+            PrintToServer("[H-AN] 警告：无法找到 han_oldweaponfix");
+        }
     }
 }
 
@@ -390,6 +405,47 @@ public Action Timer_StartAnim(Handle timer, DataPack pack)
     return Plugin_Stop;
 }
 
+// ============================================================================
+// 支持快速近战插件,强制延迟更改攻击动画 用于支持快速近战插件
+// 零前摇强制流程(快速近战)的动画启动: 推迟一帧, 落在武器系统 switch-in
+// 对齐/镜像写入之后启动自定义动画, 之后每 tick 压制 VM1 压过切换同步
+// ============================================================================
+public Action Timer_ForcedFlowAnim(Handle timer, DataPack pack)
+{
+    pack.Reset();
+
+    int client = pack.ReadCell();
+    int attackID = pack.ReadCell();
+    int idx = pack.ReadCell();
+    int sequence = pack.ReadCell();
+    int frames = pack.ReadCell();
+
+    if (client <= 0 ||
+        client > MaxClients ||
+        !IsClientInGame(client) ||
+        !IsPlayerAlive(client) ||
+        attackID != g_iAttackID[client])
+    {
+        return Plugin_Stop;
+    }
+
+    // 必须仍持有同一把刀(快速近战 0.4 秒窗口内一般不会变)
+    int weapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
+    if (weapon <= 0 || !IsValidEntity(weapon) || GetKnifeIndexByWeapon(weapon) != idx)
+    {
+        return Plugin_Stop;
+    }
+
+    //int vm1 = GetClientViewModel(client, 1);
+    //int seqBefore = (vm1 > 0 && IsValidEntity(vm1)) ? GetEntProp(vm1, Prop_Send, "m_nSequence") : -1;
+
+    //PrintToChat(client, "[DFK调试] 快切动画 seq=%d 延迟帧VM1=%d", sequence, seqBefore);
+
+    StartCustomAnimSafe(client, sequence, frames, attackID);
+
+    return Plugin_Stop;
+}
+
 // ======================== 攻击事件处理 ========================
 public Action EventPlayerAnim(const char[] te_name, const int[] Players, int numClients, float delay)
 {
@@ -434,6 +490,13 @@ public Action EventPlayerAnim(const char[] te_name, const int[] Players, int num
         g_iCurrentAttackPhase[client] = 0;
     }
 
+    // 零前摇强制流程指纹(外部插件清零 m_flNextAttack 后强制切刀攻击, 如快速近战):
+    // 正常攻击时该值为过去/未来的正数, 只有被显式清零才是 0。
+    // 响应: 无视 wasIdle 无条件重写间隔重新武装攻击闸门; 动画改为推迟一帧强制自定义动画
+    // (落在武器系统 switch-in 对齐/镜像写入之后, 之后每 tick 压制 VM1, 压过切换同步)。
+    // 伤害接管/连招段位/音效不受影响。
+    bool bForcedFlow = (GetEntPropFloat(client, Prop_Data, "m_flNextAttack") <= 0.0);
+
     int seq;
     int frames;
     float seqdelay;
@@ -454,7 +517,7 @@ public Action EventPlayerAnim(const char[] te_name, const int[] Players, int num
 
         g_iRightPhase[client] = (rightPhase + 1) % g_Knives[idx].iRightSeqCount;
 
-        if (!wasIdle)
+        if (!wasIdle || bForcedFlow)
         {
             SetEntPropFloat(weapon, Prop_Data, "m_flNextSecondaryAttack", now + g_Knives[idx].fRightInterval);
             SetEntPropFloat(client, Prop_Data, "m_flNextAttack", now + g_Knives[idx].fRightInterval);
@@ -472,7 +535,7 @@ public Action EventPlayerAnim(const char[] te_name, const int[] Players, int num
         // 转刀音效延迟 = 转刀起始帧 ÷ 动画fps, 精确无截断
         seqdelay = float(g_Knives[idx].iRotateFrame[phase]) / float(g_Knives[idx].iLeftFps[phase]);
 
-        if (!wasIdle)
+        if (!wasIdle || bForcedFlow)
         {
             SetEntPropFloat(weapon, Prop_Data, "m_flNextPrimaryAttack", now + g_Knives[idx].fLeftInterval[phase]);
             SetEntPropFloat(client, Prop_Data, "m_flNextAttack", now + g_Knives[idx].fLeftInterval[phase]);
@@ -488,7 +551,23 @@ public Action EventPlayerAnim(const char[] te_name, const int[] Players, int num
 
     StopKnifeSounds(client, idx);
 
-    ForceAttackAnimation(client, seq, frames);
+    if (!bForcedFlow)
+    {
+        ForceAttackAnimation(client, seq, frames);
+    }
+    else
+    {
+        // 零前摇强制流程(快速近战): 推迟一帧再启动自定义动画,
+        // 落在武器系统 switch-in 对齐/镜像写入之后, 由自定义动画模块每 tick 压制 VM1
+        DataPack pack2 = new DataPack();
+        pack2.WriteCell(client);
+        pack2.WriteCell(attackID);
+        pack2.WriteCell(idx);
+        pack2.WriteCell(seq);
+        pack2.WriteCell(frames);
+
+        CreateTimer(0.0, Timer_ForcedFlowAnim, pack2, TIMER_FLAG_NO_MAPCHANGE | TIMER_DATA_HNDL_CLOSE);
+    }
 
     DataPack pack = new DataPack();
     pack.WriteCell(client);
@@ -1135,4 +1214,62 @@ void RefreshDeltaKnifeCVars()
 {
     g_bEnable = g_hEnableCvar.BoolValue;
     g_bSoundEnable = g_hSoundEnableCvar.BoolValue;
+}
+
+// ============================================================================================
+// 强制改写覆盖快速近战的视图模型硬编码隐藏, 以便刀具动画和音效正常播放, 用于支持快速近战插件
+// ============================================================================================
+
+public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon, int &subtype, int &cmdnum, int &tickcount, int &seed, int mouse[2])
+{
+    if (client <= 0 || client > MaxClients || !IsClientInGame(client) || !IsPlayerAlive(client))
+        return Plugin_Continue;
+
+    int ActiveWeapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
+    if (ActiveWeapon <= 0 || !IsValidEntity(ActiveWeapon))
+        return Plugin_Continue;
+
+    int vm0 = GetClientViewModel(client, 0);
+    if (vm0 <= 0 || !IsValidEntity(vm0))
+        return Plugin_Continue;
+
+    int vm1 = GetClientViewModel(client, 1);
+    if (vm1 <= 0 || !IsValidEntity(vm1))
+        return Plugin_Continue;
+
+    int vm0Effects = GetEntProp(vm0, Prop_Send, "m_fEffects");
+    int vm1Effects = GetEntProp(vm1, Prop_Send, "m_fEffects");
+
+    int idx = GetKnifeIndexByWeapon(ActiveWeapon);
+    if ( buttons & IN_ATTACK || buttons & IN_ATTACK2 )
+    {
+        if(idx != -1)
+        {
+            vm1Effects &= ~EF_NODRAW;
+            SetEntProp(vm1, Prop_Send, "m_fEffects", vm1Effects);
+
+            vm0Effects |= EF_NODRAW;
+            SetEntProp(vm0, Prop_Send, "m_fEffects", vm0Effects);
+        }
+        else
+        {
+            if(vm0Effects != EF_NODRAW )
+            {  
+                char ClassName[30];
+                GetEntityClassname(ActiveWeapon, ClassName, sizeof(ClassName));
+                if(StrEqual(ClassName, "weapon_knife", false) && g_hOldWeaponFix != null && !g_hOldWeaponFix.BoolValue)
+                    return Plugin_Continue;
+
+                vm1Effects &= ~EF_NODRAW;
+                SetEntProp(vm1, Prop_Send, "m_fEffects", vm1Effects);
+                vm0Effects |= EF_NODRAW;
+                SetEntProp(vm0, Prop_Send, "m_fEffects", vm0Effects);
+                
+            }
+        }
+
+
+    }
+
+    return Plugin_Continue;
 }
