@@ -12,7 +12,7 @@ public Plugin myinfo =
     name = "[H-AN]CS起源三角洲刀具 Delta Force Knife",
     author = "华仔 H-AN",
     description = "华仔 H-AN 三角洲风格刀具通用驱动插件(北极星等, 组配置驱动)",
-    version = "1.7",
+    version = "1.8",
     url = "[H-AN]武器系统三角洲, QQ群107866133, github https://github.com/H-AN"
 };
 
@@ -56,6 +56,7 @@ enum struct DeltaKnifeCfg
     float fRightDamage;                         // 右键基础伤害
 
     float fHeadshotMultiplier;                  // 爆头伤害倍率
+    float fBotDamageMultiplier;                 // 对bot额外伤害倍率(0 = 不启用, 所有伤害计算完毕后再乘)
 
     int iRotateFrame[LEFT_COMBO_COUNT];         // 左键各刀转刀起始帧(对应 RotateSound1~3 的帧号部分, 纯路径=0 即立即播放)
     char sRotateSound1[PLATFORM_MAX_PATH];      // 左键第一刀转刀音效 "帧号:路径" 或 "路径"(留空不播)
@@ -280,6 +281,12 @@ public Action TraceAttack(int victim, int &attacker, int &inflictor, float &dama
     else
     {
         damage = baseDamage;
+    }
+
+    // 对bot额外伤害倍率(可选): 所有伤害计算完毕后再乘, 仅对bot生效, 打玩家不受影响
+    if (g_Knives[idx].fBotDamageMultiplier > 0.0 && victim != attacker && IsFakeClient(victim))
+    {
+        damage *= g_Knives[idx].fBotDamageMultiplier;
     }
 
     return Plugin_Changed;
@@ -875,6 +882,17 @@ void LoadKnifeGroup(Handle kv, const char[] groupName)
     g_Knives[idx].fRightDamage = KvGetFloat(kv, "RightDamage", 60.0);
     g_Knives[idx].fHeadshotMultiplier = KvGetFloat(kv, "HeadshotMultiplier", 2.0);
 
+    // 对bot额外伤害倍率(可选): 留空/填0/不填 = 不启用, 填正数 = 所有伤害计算完毕后再乘(仅对bot生效, 不分部位)
+    char sBotMult[32];
+    KvGetString(kv, "BotDamageMultiplier", sBotMult, sizeof(sBotMult), "");
+    g_Knives[idx].fBotDamageMultiplier = 0.0;
+    if (strlen(sBotMult) > 0)
+    {
+        float botMult = StringToFloat(sBotMult);
+        if (botMult > 0.0)
+            g_Knives[idx].fBotDamageMultiplier = botMult;
+    }
+
     // 转刀音效: "帧号:路径" = 动画第N帧开始播放; "路径"(无冒号) = 第0帧立即播放; 留空 = 不播放
     char sSoundValue[PLATFORM_MAX_PATH];
     char sSoundPath[PLATFORM_MAX_PATH];
@@ -994,6 +1012,8 @@ void WriteDefaultConfig(const char[] path)
     WriteFileLine(file, "// RightDamage            右键基础伤害");
     WriteFileLine(file, "//");
     WriteFileLine(file, "// HeadshotMultiplier     爆头伤害倍率");
+    WriteFileLine(file, "// BotDamageMultiplier    (可选)对bot的额外伤害倍率, 留空或填 0 = 不启用");
+    WriteFileLine(file, "//                        填正数时: 不分爆头/非爆头, 在所有伤害计算完毕后再乘此倍率, 仅对bot生效(打玩家不受影响)");
     WriteFileLine(file, "//");
     WriteFileLine(file, "// RotateSound1~3         左键各刀转刀音效, 格式 \"帧号:路径\" = 动画第N帧开始播放(不带帧号 = 第0帧立即播放, 留空 = 不播放)");
     WriteFileLine(file, "// RightRotateSound       右键转刀音效, 格式同 RotateSound1~3");
@@ -1063,6 +1083,8 @@ void WriteDefaultConfig(const char[] path)
 
     WriteFileLine(file, "        // 爆头伤害倍率");
     WriteFileLine(file, "        \"HeadshotMultiplier\"     \"2.0\"");
+    WriteFileLine(file, "        // (可选)对bot额外伤害倍率: 留空或 0 = 不启用, 填正数则所有伤害算完后再乘(仅对bot, 不分部位)");
+    WriteFileLine(file, "        // \"BotDamageMultiplier\"    \"2.0\"");
 
     WriteFileLine(file, "        // 转刀音效: \"帧号:路径\" = 动画第N帧开始播放(不带帧号 = 第0帧立即播放)");
     WriteFileLine(file, "        \"RotateSound1\"           \"40:weapons/beijixing/beijixing_rotate_1.wav\"");
@@ -1107,6 +1129,7 @@ void WriteDefaultConfig(const char[] path)
     WriteFileLine(file, "    //     \"RightInterval\"          \"0.6\"");
     WriteFileLine(file, "    //     \"RightDamage\"            \"60.0\"");
     WriteFileLine(file, "    //     \"HeadshotMultiplier\"     \"2.0\"");
+    WriteFileLine(file, "    //     \"BotDamageMultiplier\"    \"2.0\"   // (可选)对bot额外倍率, 留空或0 = 不启用, 伤害算完后再乘");
     WriteFileLine(file, "    //     \"RotateSound1\"           \"40:weapons/mynewknife/rotate_1.wav\"   // 动画第40帧开始播放");
     WriteFileLine(file, "    //     \"RotateSound2\"           \"40:weapons/mynewknife/rotate_2.wav\"");
     WriteFileLine(file, "    //     \"RotateSound3\"           \"55:weapons/mynewknife/rotate_3.wav\"");
