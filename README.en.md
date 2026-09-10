@@ -99,8 +99,8 @@ The config file uses KeyValues format — one group per knife, group names are a
 | `RightInterval` | Attack interval from one right click to the next (seconds) | `0.6` |
 | `RightDamage` | Base damage of the right-click heavy attack | `60` |
 | `HeadshotMultiplier` | Headshot damage multiplier | `2.0` |
-| `RotateSound1~3` | Blade-rotate sound of each left-click hit, format **`frame:path`** = starts playing at frame N of the animation (no frame = plays immediately at frame 0; empty = not played) | empty |
-| `RightRotateSound` | Right-click blade-rotate sound, same format as `RotateSound1~3` | empty |
+| `RotateSound1~3` | Blade-rotate sound of each left-click hit, format **`frame:path`** = starts playing at frame N of the animation (no frame = plays immediately at frame 0; empty = not played). Supports **multiple chained entries separated by commas** (e.g. `"5:xx/a.wav,33:xx/b.wav"` = a at frame 5, b at frame 33), each delayed independently on the shared channel, up to 4 entries | empty |
+| `RightRotateSound` | Right-click blade-rotate sound, same format as `RotateSound1~3`, also supports comma-separated multiple entries | empty |
 | `DrawSequence2` | QC sequence number of the special draw. **Filling this enables the dual draw animation**: every draw has a 50% chance to play the vanilla synced draw and a 50% chance to play this sequence; not filled = draws are not touched | empty |
 | `DrawFrames2` | Total frame count of the special draw animation (state duration = frames ÷ 30 s, must cover the whole draw) | none |
 | `DrawSound1` | Normal draw sound (played when the synced draw plays; empty = not played) | empty |
@@ -168,6 +168,7 @@ The config file uses KeyValues format — one group per knife, group names are a
     "LeftSequence3"     "6"
     "LeftFps1"          "64"     // animation fps (defaults to 66 if omitted)
     "RotateSound1"      "40:weapons/mynewknife/rotate_1.wav"   // starts playing at frame 40
+    "RotateSound3"      "7:weapons/mynewknife/fire.wav,43:weapons/mynewknife/rotate_3.wav"   // chained sounds: fire at frame 7, rotate_3 at frame 43
     "RightSequence"     "8"      // a single value = fixed heavy attack animation
     // ...fill in the rest as needed; missing keys use the Polaris defaults
 }

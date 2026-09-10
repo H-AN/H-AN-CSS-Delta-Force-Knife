@@ -12,7 +12,7 @@ public Plugin myinfo =
     name = "[H-AN]CS起源三角洲刀具 Delta Force Knife",
     author = "华仔 H-AN",
     description = "华仔 H-AN 三角洲风格刀具通用驱动插件(北极星等, 组配置驱动)",
-    version = "1.8",
+    version = "1.9",
     url = "[H-AN]武器系统三角洲, QQ群107866133, github https://github.com/H-AN"
 };
 
@@ -24,6 +24,11 @@ public Plugin myinfo =
 #define MAX_DFKNIVES     32      // 最多支持的刀具组数量
 #define MAX_RIGHT_SEQ    4       // 右键动画序列列表最大数量
 #define LEFT_COMBO_COUNT 3       // 左键连招段数(固定三刀)
+#define ROTATE_SLOT_COUNT 4      // 转刀音效槽位数: 0~2=左键三刀 3=右键
+#define MAX_ROTATE_SOUNDS 4      // 每个转刀音效槽位最多音效条数(逗号分隔)
+
+// 平铺下标: 槽位(0~3) + 条目(0~MAX_ROTATE_SOUNDS-1) -> 第二维下标(压平存储, 兼容旧版编译器)
+#define RotateSoundIdx(%1,%2) (((%1) * MAX_ROTATE_SOUNDS) + (%2))
 
 // ======================== ConVars ========================
 // 组参数全部走 configs/DeltaForceKnife.cfg, 只有总开关和音效开关走 CVar
@@ -58,13 +63,6 @@ enum struct DeltaKnifeCfg
     float fHeadshotMultiplier;                  // 爆头伤害倍率
     float fBotDamageMultiplier;                 // 对bot额外伤害倍率(0 = 不启用, 所有伤害计算完毕后再乘)
 
-    int iRotateFrame[LEFT_COMBO_COUNT];         // 左键各刀转刀起始帧(对应 RotateSound1~3 的帧号部分, 纯路径=0 即立即播放)
-    char sRotateSound1[PLATFORM_MAX_PATH];      // 左键第一刀转刀音效 "帧号:路径" 或 "路径"(留空不播)
-    char sRotateSound2[PLATFORM_MAX_PATH];      // 左键第二刀
-    char sRotateSound3[PLATFORM_MAX_PATH];      // 左键第三刀
-    int iRightRotateFrame;                      // 右键转刀起始帧(对应 RightRotateSound 的帧号部分)
-    char sRightRotateSound[PLATFORM_MAX_PATH];  // 右键转刀音效 "帧号:路径" 或 "路径"(留空不播)
-
     int iDrawSeq2;                              // 特殊切换 QC 序列号(-1 = 双切换功能关闭)
     int iDrawFrames2;                           // 特殊切换动画总帧数(状态时长 = 帧数/30, 须覆盖整个 draw)
     char sDrawSound1[PLATFORM_MAX_PATH];        // 普通切换音效(走同步 draw 时播放, 留空不播)
@@ -74,6 +72,14 @@ enum struct DeltaKnifeCfg
     char sKillSound[PLATFORM_MAX_PATH];         // 普通击杀音(留空不播)
     char sHeadshotSound[PLATFORM_MAX_PATH];     // 爆头击杀音(留空不播)
 }
+
+// 转刀音效存储
+// 槽位 0~2 = 左键三刀(RotateSound1~3), 3 = 右键(RightRotateSound)
+// 每槽位支持多条音效(逗号分隔), 每条带各自转刀起始帧, 共用转刀通道顺序播放
+// 路径数组第二维 = 槽位 x 条目 压平(RotateSoundIdx), 避免四维数组
+int g_iRotateFrame[MAX_DFKNIVES][ROTATE_SLOT_COUNT][MAX_ROTATE_SOUNDS];
+char g_sRotateSound[MAX_DFKNIVES][ROTATE_SLOT_COUNT * MAX_ROTATE_SOUNDS][PLATFORM_MAX_PATH];
+int g_iRotateSoundCount[MAX_DFKNIVES][ROTATE_SLOT_COUNT];
 
 DeltaKnifeCfg g_Knives[MAX_DFKNIVES];
 int g_iKnifeCount = 0;
@@ -311,14 +317,14 @@ void StopKnifeSounds(int client, int idx)
     if (idx < 0 || idx >= g_iKnifeCount)
         return;
 
-    if (strlen(g_Knives[idx].sRotateSound1) > 0)
-        StopSound(client, SNDCHAN_KNIFE, g_Knives[idx].sRotateSound1);
-    if (strlen(g_Knives[idx].sRotateSound2) > 0)
-        StopSound(client, SNDCHAN_KNIFE, g_Knives[idx].sRotateSound2);
-    if (strlen(g_Knives[idx].sRotateSound3) > 0)
-        StopSound(client, SNDCHAN_KNIFE, g_Knives[idx].sRotateSound3);
-    if (strlen(g_Knives[idx].sRightRotateSound) > 0)
-        StopSound(client, SNDCHAN_KNIFE, g_Knives[idx].sRightRotateSound);
+    // 与 Timer_DelaySound 一致: 统一转刀通道, 逐条停止
+    for (int slot = 0; slot < ROTATE_SLOT_COUNT; slot++)
+    {
+        for (int i = 0; i < g_iRotateSoundCount[idx][slot]; i++)
+        {
+            StopSound(client, SNDCHAN_KNIFE, g_sRotateSound[idx][RotateSoundIdx(slot, i)]);
+        }
+    }
 }
 
 // ======================== 动画强制 ========================
@@ -506,8 +512,8 @@ public Action EventPlayerAnim(const char[] te_name, const int[] Players, int num
 
     int seq;
     int frames;
-    float seqdelay;
     int slot;
+    int fps;
 
     if (animEvent == 0)
     {
@@ -519,8 +525,7 @@ public Action EventPlayerAnim(const char[] te_name, const int[] Players, int num
 
         seq = g_Knives[idx].iRightSeq[rightPhase];
         frames = g_Knives[idx].iRightFrames;
-        // 转刀音效延迟 = 转刀起始帧 ÷ 动画fps, 精确无截断
-        seqdelay = float(g_Knives[idx].iRightRotateFrame) / float(g_Knives[idx].iRightFps);
+        fps = g_Knives[idx].iRightFps;
 
         g_iRightPhase[client] = (rightPhase + 1) % g_Knives[idx].iRightSeqCount;
 
@@ -539,8 +544,7 @@ public Action EventPlayerAnim(const char[] te_name, const int[] Players, int num
 
         seq = g_Knives[idx].iLeftSeq[phase];
         frames = g_Knives[idx].iLeftFrames[phase];
-        // 转刀音效延迟 = 转刀起始帧 ÷ 动画fps, 精确无截断
-        seqdelay = float(g_Knives[idx].iRotateFrame[phase]) / float(g_Knives[idx].iLeftFps[phase]);
+        fps = g_Knives[idx].iLeftFps[phase];
 
         if (!wasIdle || bForcedFlow)
         {
@@ -576,13 +580,18 @@ public Action EventPlayerAnim(const char[] te_name, const int[] Players, int num
         CreateTimer(0.0, Timer_ForcedFlowAnim, pack2, TIMER_FLAG_NO_MAPCHANGE | TIMER_DATA_HNDL_CLOSE);
     }
 
-    DataPack pack = new DataPack();
-    pack.WriteCell(client);
-    pack.WriteCell(attackID);
-    pack.WriteCell(idx);
-    pack.WriteCell(slot);
+    // 转刀音效: 每条独立延迟 Timer, 延迟 = 该条起始帧 ÷ 动画fps, 精确无截断
+    for (int i = 0; i < g_iRotateSoundCount[idx][slot]; i++)
+    {
+        DataPack pack = new DataPack();
+        pack.WriteCell(client);
+        pack.WriteCell(attackID);
+        pack.WriteCell(idx);
+        pack.WriteCell(slot);
+        pack.WriteCell(i);
 
-    CreateTimer(seqdelay, Timer_DelaySound, pack, TIMER_FLAG_NO_MAPCHANGE | TIMER_DATA_HNDL_CLOSE);
+        CreateTimer(float(g_iRotateFrame[idx][slot][i]) / float(fps), Timer_DelaySound, pack, TIMER_FLAG_NO_MAPCHANGE | TIMER_DATA_HNDL_CLOSE);
+    }
 
     return Plugin_Continue;
 }
@@ -595,6 +604,7 @@ public Action Timer_DelaySound(Handle timer, DataPack pack)
     int attackID = pack.ReadCell();
     int idx = pack.ReadCell();
     int slot = pack.ReadCell();
+    int soundIdx = pack.ReadCell();
 
     // 这个 Timer 属于旧攻击 / 音效开关已关
     if (client <= 0 ||
@@ -604,45 +614,22 @@ public Action Timer_DelaySound(Handle timer, DataPack pack)
         attackID != g_iAttackID[client] ||
         idx < 0 ||
         idx >= g_iKnifeCount ||
+        slot < 0 ||
+        slot >= ROTATE_SLOT_COUNT ||
+        soundIdx < 0 ||
+        soundIdx >= g_iRotateSoundCount[idx][slot] ||
         !g_bSoundEnable)
     {
         return Plugin_Stop;
     }
 
+    // 槽位音效留空 = 不播放
     char sSoundPath[PLATFORM_MAX_PATH];
-
-    switch (slot)
-    {
-        case 0:
-        {
-            strcopy(sSoundPath, sizeof(sSoundPath), g_Knives[idx].sRotateSound1);
-        }
-
-        case 1:
-        {
-            strcopy(sSoundPath, sizeof(sSoundPath), g_Knives[idx].sRotateSound2);
-        }
-
-        case 2:
-        {
-            strcopy(sSoundPath, sizeof(sSoundPath), g_Knives[idx].sRotateSound3);
-        }
-
-        case 3:
-        {
-            strcopy(sSoundPath, sizeof(sSoundPath), g_Knives[idx].sRightRotateSound);
-        }
-
-        default:
-        {
-            return Plugin_Stop;
-        }
-    }
-
-    // 音效留空 = 不播放
+    strcopy(sSoundPath, sizeof(sSoundPath), g_sRotateSound[idx][RotateSoundIdx(slot, soundIdx)]);
     if (strlen(sSoundPath) == 0)
         return Plugin_Stop;
 
+    // 组合音效共用转刀通道: 同通道后播的会打断先播的, 帧号时序由配置保证
     EmitSoundToAll(sSoundPath, client, SNDCHAN_KNIFE, SNDLEVEL_NORMAL);
 
     return Plugin_Stop;
@@ -893,25 +880,17 @@ void LoadKnifeGroup(Handle kv, const char[] groupName)
             g_Knives[idx].fBotDamageMultiplier = botMult;
     }
 
-    // 转刀音效: "帧号:路径" = 动画第N帧开始播放; "路径"(无冒号) = 第0帧立即播放; 留空 = 不播放
-    char sSoundValue[PLATFORM_MAX_PATH];
-    char sSoundPath[PLATFORM_MAX_PATH];
+    // 转刀音效(每槽位支持多条, 逗号分隔): 每条格式 "帧号:路径" = 动画第N帧开始播放
+    // "路径"(无冒号) = 第0帧立即播放; 整键留空 = 不播放
+    // 单条写法(如 "40:weapons/xx/a.wav")与旧版完全兼容
+    char sSoundKeys[ROTATE_SLOT_COUNT][20] = { "RotateSound1", "RotateSound2", "RotateSound3", "RightRotateSound" };
+    char sSoundValue[1024];
 
-    KvGetString(kv, "RotateSound1", sSoundValue, sizeof(sSoundValue), "");
-    ParseRotateSoundValue(sSoundValue, g_Knives[idx].iRotateFrame[0], sSoundPath, sizeof(sSoundPath));
-    strcopy(g_Knives[idx].sRotateSound1, PLATFORM_MAX_PATH, sSoundPath);
-
-    KvGetString(kv, "RotateSound2", sSoundValue, sizeof(sSoundValue), "");
-    ParseRotateSoundValue(sSoundValue, g_Knives[idx].iRotateFrame[1], sSoundPath, sizeof(sSoundPath));
-    strcopy(g_Knives[idx].sRotateSound2, PLATFORM_MAX_PATH, sSoundPath);
-
-    KvGetString(kv, "RotateSound3", sSoundValue, sizeof(sSoundValue), "");
-    ParseRotateSoundValue(sSoundValue, g_Knives[idx].iRotateFrame[2], sSoundPath, sizeof(sSoundPath));
-    strcopy(g_Knives[idx].sRotateSound3, PLATFORM_MAX_PATH, sSoundPath);
-
-    KvGetString(kv, "RightRotateSound", sSoundValue, sizeof(sSoundValue), "");
-    ParseRotateSoundValue(sSoundValue, g_Knives[idx].iRightRotateFrame, sSoundPath, sizeof(sSoundPath));
-    strcopy(g_Knives[idx].sRightRotateSound, PLATFORM_MAX_PATH, sSoundPath);
+    for (int slot = 0; slot < ROTATE_SLOT_COUNT; slot++)
+    {
+        KvGetString(kv, sSoundKeys[slot], sSoundValue, sizeof(sSoundValue), "");
+        ParseRotateSoundList(sSoundValue, idx, slot, groupName);
+    }
 
     // 双切换动画(可选): 不填 DrawSequence2 = 功能关闭, 掏刀行为与现在完全一致
     g_Knives[idx].iDrawSeq2 = -1;
@@ -946,35 +925,73 @@ void LoadKnifeGroup(Handle kv, const char[] groupName)
 }
 
 // ============================================================================
-// 解析转刀音效值: "帧号:路径" = 动画第N帧开始播放
-//                 "路径"(无冒号)  = 第0帧立即播放
+// 解析转刀音效列表(与武器系统换弹音效 ScheduleReloadSounds 同款解析):
+//     逗号分隔多条, 每条 "帧号:路径" = 动画第N帧开始播放, "路径"(无冒号) = 第0帧立即播放
+//     "5:weapons/xx/a.wav,33:weapons/xx/b.wav" = 第5帧播a, 第33帧播b
+//     "40:weapons/xx/a.wav"                   = 单条, 与旧版格式完全兼容
 // ============================================================================
-void ParseRotateSoundValue(const char[] value, int &frame, char[] path, int pathLen)
+void ParseRotateSoundList(const char[] value, int knifeIdx, int slot, const char[] groupName)
 {
-    char sFrame[16];
+    g_iRotateSoundCount[knifeIdx][slot] = 0;
 
-    // SplitString: sFrame = 冒号前部分, 返回值 = 冒号后起始下标(-1 = 无冒号)
-    int pos = SplitString(value, ":", sFrame, sizeof(sFrame));
-    if (pos == -1)
-    {
-        // 无冒号 = 纯路径, 第0帧立即播放
-        frame = 0;
-        strcopy(path, pathLen, value);
+    if (strlen(value) == 0)
         return;
-    }
 
-    frame = StringToInt(sFrame);
-    if (frame < 0)
-        frame = 0;
+    char sParts[MAX_ROTATE_SOUNDS][PLATFORM_MAX_PATH];
+    int count = ExplodeString(value, ",", sParts, MAX_ROTATE_SOUNDS, PLATFORM_MAX_PATH);
 
-    // 冒号之后的部分即路径
-    int i = 0;
-    while (value[pos + i] != '\0' && i < pathLen - 1)
+    for (int i = 0; i < count; i++)
     {
-        path[i] = value[pos + i];
-        i++;
+        TrimString(sParts[i]);
+        if (strlen(sParts[i]) == 0)
+            continue;
+
+        // 冒号拆两段: pair[0]=帧号 pair[1]=路径; 纯路径(无冒号)按第0帧立即播放
+        char sPair[2][PLATFORM_MAX_PATH];
+        int frame = 0;
+        char sPath[PLATFORM_MAX_PATH];
+
+        if (ExplodeString(sParts[i], ":", sPair, 2, PLATFORM_MAX_PATH) == 2)
+        {
+            frame = StringToInt(sPair[0]);
+            if (frame < 0)
+                frame = 0;
+
+            strcopy(sPath, sizeof(sPath), sPair[1]);
+        }
+        else
+        {
+            strcopy(sPath, sizeof(sPath), sParts[i]);
+        }
+
+        TrimString(sPath);
+        NormalizeSoundPath(sPath);
+
+        if (strlen(sPath) == 0)
+            continue;
+
+        int n = g_iRotateSoundCount[knifeIdx][slot];
+        g_iRotateFrame[knifeIdx][slot][n] = frame;
+        strcopy(g_sRotateSound[knifeIdx][RotateSoundIdx(slot, n)], PLATFORM_MAX_PATH, sPath);
+        g_iRotateSoundCount[knifeIdx][slot] = n + 1;
     }
-    path[i] = '\0';
+
+    // 逗号条数超过上限: 多余的被 ExplodeString 截断, 提示配置作者
+    if (g_iRotateSoundCount[knifeIdx][slot] >= MAX_ROTATE_SOUNDS && StrContains(value, ",", true) != -1)
+    {
+        // 再数一遍逗号判断是否真的超了
+        int commas = 0;
+        for (int c = 0; value[c] != '\0'; c++)
+        {
+            if (value[c] == ',')
+                commas++;
+        }
+
+        if (commas >= MAX_ROTATE_SOUNDS)
+        {
+            LogError("[H-AN] DeltaForceKnife 组 [%s] 转刀音效条数超过上限 %d, 多余条目被忽略", groupName, MAX_ROTATE_SOUNDS);
+        }
+    }
 }
 
 // ============================================================
@@ -1015,8 +1032,10 @@ void WriteDefaultConfig(const char[] path)
     WriteFileLine(file, "// BotDamageMultiplier    (可选)对bot的额外伤害倍率, 留空或填 0 = 不启用");
     WriteFileLine(file, "//                        填正数时: 不分爆头/非爆头, 在所有伤害计算完毕后再乘此倍率, 仅对bot生效(打玩家不受影响)");
     WriteFileLine(file, "//");
-    WriteFileLine(file, "// RotateSound1~3         左键各刀转刀音效, 格式 \"帧号:路径\" = 动画第N帧开始播放(不带帧号 = 第0帧立即播放, 留空 = 不播放)");
-    WriteFileLine(file, "// RightRotateSound       右键转刀音效, 格式同 RotateSound1~3");
+    WriteFileLine(file, "// RotateSound1~3         左键各刀转刀音效, 支持逗号分隔多条, 每条格式 \"帧号:路径\" = 动画第N帧开始播放");
+    WriteFileLine(file, "//                        (不带帧号 = 第0帧立即播放, 留空 = 不播放)");
+    WriteFileLine(file, "//                        例: \"5:weapons/xx/a.wav,33:weapons/xx/b.wav\" = 第5帧播a, 第33帧播b, 同通道顺序播放后者打断前者");
+    WriteFileLine(file, "// RightRotateSound       右键转刀音效, 格式同 RotateSound1~3, 同样支持逗号分隔多条");
     WriteFileLine(file, "//");
     WriteFileLine(file, "// DrawSequence2          特殊切换的 QC 序列号(填了才启用双切换动画: 50% 播此序列, 50% 走原版同步 draw)");
     WriteFileLine(file, "// DrawFrames2            特殊切换动画总帧数(状态时长 = 帧数/30, 必须覆盖整个切换动画)");
@@ -1132,7 +1151,7 @@ void WriteDefaultConfig(const char[] path)
     WriteFileLine(file, "    //     \"BotDamageMultiplier\"    \"2.0\"   // (可选)对bot额外倍率, 留空或0 = 不启用, 伤害算完后再乘");
     WriteFileLine(file, "    //     \"RotateSound1\"           \"40:weapons/mynewknife/rotate_1.wav\"   // 动画第40帧开始播放");
     WriteFileLine(file, "    //     \"RotateSound2\"           \"40:weapons/mynewknife/rotate_2.wav\"");
-    WriteFileLine(file, "    //     \"RotateSound3\"           \"55:weapons/mynewknife/rotate_3.wav\"");
+    WriteFileLine(file, "    //     \"RotateSound3\"           \"5:weapons/mynewknife/fire.wav,55:weapons/mynewknife/rotate_3.wav\"   // 逗号分隔多条, 各帧号独立延迟播放");
     WriteFileLine(file, "    //     \"RightRotateSound\"       \"40:weapons/mynewknife/rotate_3.wav\"");
     WriteFileLine(file, "    //     \"DrawSequence2\"          \"12\"     // 特殊切换序列号(填了才启用双切换)");
     WriteFileLine(file, "    //     \"DrawFrames2\"            \"80\"     // 特殊切换动画总帧数");
@@ -1153,10 +1172,14 @@ void PrecacheSounds()
 {
     for (int i = 0; i < g_iKnifeCount; i++)
     {
-        PrecacheSoundPath(g_Knives[i].sRotateSound1);
-        PrecacheSoundPath(g_Knives[i].sRotateSound2);
-        PrecacheSoundPath(g_Knives[i].sRotateSound3);
-        PrecacheSoundPath(g_Knives[i].sRightRotateSound);
+        for (int slot = 0; slot < ROTATE_SLOT_COUNT; slot++)
+        {
+            for (int s = 0; s < g_iRotateSoundCount[i][slot]; s++)
+            {
+                PrecacheSoundPath(g_sRotateSound[i][RotateSoundIdx(slot, s)]);
+            }
+        }
+
         PrecacheSoundPath(g_Knives[i].sDrawSound1);
         PrecacheSoundPath(g_Knives[i].sDrawSound2);
         PrecacheSoundPath(g_Knives[i].sHitSound);
@@ -1167,8 +1190,19 @@ void PrecacheSounds()
 
 void PrecacheSoundPath(const char[] path)
 {
-    if (strlen(path) > 0)
-        PrecacheSound(path);
+    if (strlen(path) == 0)
+        return;
+
+    // 每条音效(含逗号分隔的每一段)都必须预缓存; 文件检查只做提示用, 不拦截预缓存
+    // (音效可能打包在 VPK 内, FileExists 走裸文件系统会误判不存在)
+    char fullPath[PLATFORM_MAX_PATH];
+    Format(fullPath, sizeof(fullPath), "sound/%s", path);
+    if (!FileExists(fullPath))
+    {
+        LogError("[H-AN] DeltaForceKnife 提示: 音效文件在磁盘上未找到(可能在VPK内, 可忽略): %s", path);
+    }
+
+    PrecacheSound(path);
 }
 
 // ======================== 工具函数 ========================
@@ -1192,6 +1226,16 @@ void StringToLower(const char[] src, char[] dest, int maxlen)
     for (int i = 0; i < maxlen && dest[i] != '\0'; i++)
     {
         dest[i] = CharToLower(dest[i]);
+    }
+}
+
+// 路径反斜杠统一转正斜杠(与武器系统 NormalizePath 同款)
+void NormalizeSoundPath(char[] path)
+{
+    for (int i = 0; i < strlen(path); i++)
+    {
+        if (path[i] == '\\')
+            path[i] = '/';
     }
 }
 
