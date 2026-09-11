@@ -12,7 +12,7 @@ public Plugin myinfo =
     name = "[H-AN]CS起源三角洲刀具 Delta Force Knife",
     author = "华仔 H-AN",
     description = "华仔 H-AN 三角洲风格刀具通用驱动插件(北极星等, 组配置驱动)",
-    version = "1.9",
+    version = "2.0",
     url = "[H-AN]武器系统三角洲, QQ群107866133, github https://github.com/H-AN"
 };
 
@@ -1285,15 +1285,54 @@ void RefreshDeltaKnifeCVars()
 
 // ============================================================================================
 // 强制改写覆盖快速近战的视图模型硬编码隐藏, 以便刀具动画和音效正常播放, 用于支持快速近战插件
+// 原版武器仅在 han_oldweaponfix 开启时参与; 新增武器由武器系统统一使用1号模型
 // ============================================================================================
+
+bool IsOriginalWeaponClass(const char[] classname)
+{
+    // 与 CS:S 原版 scripts/weapon_*.txt 的29项文件名一致, 不含扩展名
+    static const char originalClasses[][] =
+    {
+        // 手枪
+        "weapon_glock", "weapon_usp", "weapon_p228", "weapon_deagle", "weapon_elite", "weapon_fiveseven",
+        // 霰弹枪
+        "weapon_m3", "weapon_xm1014",
+        // 冲锋枪
+        "weapon_mac10", "weapon_tmp", "weapon_mp5navy", "weapon_ump45", "weapon_p90",
+        // 步枪
+        "weapon_galil", "weapon_famas", "weapon_ak47", "weapon_m4a1", "weapon_aug", "weapon_sg552",
+        // 狙击枪
+        "weapon_scout", "weapon_awp", "weapon_g3sg1", "weapon_sg550",
+        // 机枪、刀、手雷和C4
+        "weapon_m249", "weapon_knife", "weapon_hegrenade", "weapon_flashbang", "weapon_smokegrenade", "weapon_c4"
+    };
+
+    for (int i = 0; i < sizeof(originalClasses); i++)
+    {
+        if (StrEqual(classname, originalClasses[i], false))
+            return true;
+    }
+
+    return false;
+}
 
 public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon, int &subtype, int &cmdnum, int &tickcount, int &seed, int mouse[2])
 {
+    if ((buttons & (IN_ATTACK | IN_ATTACK2)) == 0)
+        return Plugin_Continue;
+
     if (client <= 0 || client > MaxClients || !IsClientInGame(client) || !IsPlayerAlive(client))
         return Plugin_Continue;
 
     int ActiveWeapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
     if (ActiveWeapon <= 0 || !IsValidEntity(ActiveWeapon))
+        return Plugin_Continue;
+
+    char classname[64];
+    GetEntityClassname(ActiveWeapon, classname, sizeof(classname));
+
+    // 原版武器在修复关闭或Cvar不可用时仍走0号模型, 不得改写其显隐
+    if (IsOriginalWeaponClass(classname) && (g_hOldWeaponFix == null || !g_hOldWeaponFix.BoolValue))
         return Plugin_Continue;
 
     int vm0 = GetClientViewModel(client, 0);
@@ -1307,35 +1346,15 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
     int vm0Effects = GetEntProp(vm0, Prop_Send, "m_fEffects");
     int vm1Effects = GetEntProp(vm1, Prop_Send, "m_fEffects");
 
-    int idx = GetKnifeIndexByWeapon(ActiveWeapon);
-    if ( buttons & IN_ATTACK || buttons & IN_ATTACK2 )
+    // 仅修正隐藏位, 保留其他效果位; 已处于目标状态时不重复写入
+    if ((vm1Effects & EF_NODRAW) != 0)
     {
-        if(idx != -1)
-        {
-            vm1Effects &= ~EF_NODRAW;
-            SetEntProp(vm1, Prop_Send, "m_fEffects", vm1Effects);
+        SetEntProp(vm1, Prop_Send, "m_fEffects", vm1Effects & ~EF_NODRAW);
+    }
 
-            vm0Effects |= EF_NODRAW;
-            SetEntProp(vm0, Prop_Send, "m_fEffects", vm0Effects);
-        }
-        else
-        {
-            if(vm0Effects != EF_NODRAW )
-            {  
-                char ClassName[30];
-                GetEntityClassname(ActiveWeapon, ClassName, sizeof(ClassName));
-                if(StrEqual(ClassName, "weapon_knife", false) && g_hOldWeaponFix != null && !g_hOldWeaponFix.BoolValue)
-                    return Plugin_Continue;
-
-                vm1Effects &= ~EF_NODRAW;
-                SetEntProp(vm1, Prop_Send, "m_fEffects", vm1Effects);
-                vm0Effects |= EF_NODRAW;
-                SetEntProp(vm0, Prop_Send, "m_fEffects", vm0Effects);
-                
-            }
-        }
-
-
+    if ((vm0Effects & EF_NODRAW) == 0)
+    {
+        SetEntProp(vm0, Prop_Send, "m_fEffects", vm0Effects | EF_NODRAW);
     }
 
     return Plugin_Continue;
