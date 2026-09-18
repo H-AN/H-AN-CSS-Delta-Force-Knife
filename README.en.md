@@ -43,7 +43,7 @@ It evolved from the Polaris-exclusive plugin `[H-AN-CSS]Polaris Knife`: everythi
 | --- | --- |
 | Counter-Strike: Source dedicated server | Game platform |
 | SourceMod **1.12+** | Compile & runtime environment |
-| **HanWeaponSystem** (H-AN Weapon System) | Must be loaded — provides `Han_SetClientCustomAnim` and related animation APIs |
+| **HanWeaponSystem 8.2** (H-AN Weapon System) | Required by version 2.1; compile with its current include. Provides knife attack, pre-damage, cached hitgroup and confirmed viewmodel-mode APIs |
 
 ## Installation
 
@@ -176,8 +176,11 @@ The config file uses KeyValues format — one group per knife, group names are a
 
 ## How It Works (Brief)
 
-- A TempEnt hook on `PlayerAnimEvent` captures the player's right-click (`m_iEvent=0`) / left-click (`m_iEvent=1`) attack animation events, advances the combo state machine, rewrites `m_flNextPrimaryAttack` / `m_flNextSecondaryAttack` / `m_flNextAttack` to control attack speed, and calls HanWeaponSystem's `Han_SetClientCustomAnim` to play the custom animation
-- `SDKHook_TraceAttack` takes over damage: a ray is traced from the attacker's viewpoint against the victim to obtain the hitgroup; head hits (1) are multiplied by the headshot multiplier, and a missed ray (0) also counts as a headshot as a fallback (identical to Polaris behavior)
+- Version 2.1 advances combos exclusively through `Han_OnKnifeAttack`, preserving existing animation, interval and quick-melee handling. It no longer also listens to `PlayerAnimEvent`.
+- `Han_OnKnifeDamage` handles both native hits and extended-range damage before health is deducted. `Han_GetKnifeAttackResult` supplies the current hitgroup without additional rays. Explicit head hits and unknown hitgroups retain the existing headshot multiplier, followed by the Bot multiplier and the main weapon system's configured damage adjustment.
+- Hit/kill sounds use the current attack ID, victim and tick instead of a previous-hit cache. Viewmodel visibility repair uses `Han_GetClientViewModelMode`; only confirmed VM1 mode is repaired. The hardcoded stock-weapon list and han_oldweaponfix lookup are removed.
+
+Output: `D:\github\git\build\DeltaForceKnife-2.1.smx`. Requires HanWeaponSystem 8.2; 8.1 lacks the required natives. No live configuration changes or deployment were performed. In-game testing remains pending for combo timing, native/extended-range damage, first-hit headshots, lethal-hit sounds, Bot multipliers and quick weapon switching. The main system's bounded classification differs from the old infinite ray; unknown hitgroups still use the existing headshot fallback.
 - Blade-rotate sounds are played through timers carrying an attack ID; the delay = configured rotate frame ÷ animation fps (exact conversion, no rounding); a new attack invalidates the previous attack's pending sound
 - The hitgroup is written into the `hitgroup` field of the `player_hurt` event and recorded for the kill sound decision
 

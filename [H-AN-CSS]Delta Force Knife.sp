@@ -1,4 +1,4 @@
-#pragma semicolon 1
+﻿#pragma semicolon 1
 #pragma newdecls required
 
 #include <sourcemod>
@@ -12,7 +12,7 @@ public Plugin myinfo =
     name = "[H-AN]CS起源三角洲刀具 Delta Force Knife",
     author = "华仔 H-AN",
     description = "华仔 H-AN 三角洲风格刀具通用驱动插件(北极星等, 组配置驱动)",
-    version = "2.0",
+    version = "2.1",
     url = "[H-AN]武器系统三角洲, QQ群107866133, github https://github.com/H-AN"
 };
 
@@ -34,7 +34,6 @@ public Plugin myinfo =
 // 组参数全部走 configs/DeltaForceKnife.cfg, 只有总开关和音效开关走 CVar
 ConVar g_hEnableCvar;
 ConVar g_hSoundEnableCvar;
-ConVar g_hOldWeaponFix;
 
 bool g_bEnable;
 bool g_bSoundEnable;
@@ -92,7 +91,13 @@ int g_iRightPhase[MAXPLAYERS + 1];                          // 右键交替序�
 int g_iCurrentAttackPhase[MAXPLAYERS + 1];                  // 当前攻击段位(0~2=左键 3=右键), 伤害查表用
 int g_iKnifeIndex[MAXPLAYERS + 1];                          // 当前连招所属刀具组索引
 float g_fLastAttackTime[MAXPLAYERS + 1];                    // 上次攻击时间, 空闲超时判断
-int g_iLastKnifeHitGroup[MAXPLAYERS + 1][MAXPLAYERS + 1];   // victim x attacker 最近命中部位(击杀音判断)
+int g_iHanAttackID[MAXPLAYERS + 1];
+int g_iDamageAttackID[MAXPLAYERS + 1];
+int g_iDamageTick[MAXPLAYERS + 1];
+int g_iCooldownAttack[MAXPLAYERS + 1];
+int g_iCooldownWeapon[MAXPLAYERS + 1];
+float g_fCooldownUntil[MAXPLAYERS + 1];
+bool g_bCooldownSecondary[MAXPLAYERS + 1];
 
 // ======================== 插件生命周期 ========================
 public void OnPluginStart()
@@ -101,41 +106,32 @@ public void OnPluginStart()
 
     RegAdminCmd("sm_deltaforce_knife_reload", CmdReload, ADMFLAG_CONFIG, "重载三角洲刀具配置(configs/DeltaForceKnife.cfg)");
 
-    AddTempEntHook("PlayerAnimEvent", EventPlayerAnim);
     HookEvent("player_hurt", EventPlayerHurt, EventHookMode_Pre);
     HookEvent("player_death", EventPlayerDeath, EventHookMode_Pre);
     HookEvent("player_spawn", EventPlayerSpawn, EventHookMode_Post);
+    for (int client = 1; client <= MaxClients; client++)
+    {
+        if (IsClientInGame(client))
+            OnClientPutInServer(client);
+    }
 }
 
 public void OnAllPluginsLoaded()
 {
-    if (LibraryExists("HanWeaponSystem"))
-    {
-        PrintToServer("[H-AN] HanWeaponSystem 已加载, Delta Force Knife API 就绪");
-
-        // 获取 HanWeaponSystem 的旧武器修复 Cvar
-        g_hOldWeaponFix = FindConVar("han_oldweaponfix");
-
-        if (g_hOldWeaponFix != null)
-        {
-            PrintToServer("[H-AN] 已获取 han_oldweaponfix");
-        }
-        else
-        {
-            PrintToServer("[H-AN] 警告：无法找到 han_oldweaponfix");
-        }
-    }
+    PrintToServer("[H-AN] Delta Force Knife 2.1 requires HanWeaponSystem 8.2 API");
 }
 
 public void OnMapStart()
 {
+    for (int client = 1; client <= MaxClients; client++)
+        ResetPlayerState(client);
     LoadConfig();
     PrecacheSounds();
 }
 
 public void OnClientPutInServer(int client)
 {
-    SDKHook(client, SDKHook_TraceAttack, TraceAttack);
+    ResetPlayerState(client);
 
     // 双切换动画检测: 与武器系统 switchsound 同源同款钩子(切换 + 拾取/出生都算掏出)
     SDKHook(client, SDKHook_WeaponSwitch, OnKnifeSwitch);
@@ -223,7 +219,7 @@ public void OnClientDisconnect(int client)
 }
 
 // ======================== 伤害接管 ========================
-public Action TraceAttack(int victim, int &attacker, int &inflictor, float &damage, int &damagetype, int &ammotype, int hitbox, int hitgroup)
+public Action Han_OnKnifeDamage(int attacker, int weapon, int attackId, int victim, bool supplemental, float &damage)
 {
     if (!g_bEnable)
         return Plugin_Continue;
@@ -231,8 +227,14 @@ public Action TraceAttack(int victim, int &attacker, int &inflictor, float &dama
     if (attacker <= 0 || attacker > MaxClients || !IsClientInGame(attacker) || !IsPlayerAlive(attacker))
         return Plugin_Continue;
 
-    int weapon = GetEntPropEnt(attacker, Prop_Send, "m_hActiveWeapon");
     if (weapon <= 0 || !IsValidEntity(weapon))
+        return Plugin_Continue;
+
+    if (victim < 1 || victim > MaxClients || !IsClientInGame(victim) || !IsPlayerAlive(victim))
+        return Plugin_Continue;
+    HanKnifeResult result;
+    if (g_iHanAttackID[attacker] != attackId || !Han_GetKnifeAttackResult(attacker, attackId, result)
+        || EntRefToEntIndex(result.WeaponRef) != weapon || EntRefToEntIndex(result.EntityRef) != victim)
         return Plugin_Continue;
 
     int idx = GetKnifeIndexByWeapon(weapon);
@@ -272,12 +274,9 @@ public Action TraceAttack(int victim, int &attacker, int &inflictor, float &dama
         }
     }
 
-    float pos[3], ang[3];
-    GetClientEyePosition(attacker, pos);
-    GetClientEyeAngles(attacker, ang);
-
-    TR_TraceRayFilter(pos, ang, MASK_SHOT, RayType_Infinite, Trace_HitVictimOnly, victim);
-    int Hitgroup = TR_GetHitGroup();
+    int Hitgroup = result.HitGroupValid ? result.HitGroup : 0;
+    g_iDamageAttackID[attacker] = attackId;
+    g_iDamageTick[attacker] = GetGameTickCount();
 
     // 命中头部(1)或射线未命中(0)按爆头计算, 与北极星逻辑一致
     if (Hitgroup == 1 || Hitgroup == 0)
@@ -302,6 +301,12 @@ public Action TraceAttack(int victim, int &attacker, int &inflictor, float &dama
 void ResetPlayerState(int client)
 {
     g_iAttackID[client] = 0;
+    g_iHanAttackID[client] = 0;
+    g_iDamageAttackID[client] = 0;
+    g_iDamageTick[client] = -1;
+    g_iCooldownAttack[client] = 0;
+    g_iCooldownWeapon[client] = INVALID_ENT_REFERENCE;
+    g_fCooldownUntil[client] = 0.0;
     g_iLeftPhase[client] = 0;
     g_iRightPhase[client] = 0;
     g_iCurrentAttackPhase[client] = 0;
@@ -337,7 +342,7 @@ void ForceAttackAnimation(int client, int sequence, int frames)
         SetEntProp(vm0, Prop_Send, "m_nSequence", 0);
     }
 
-    // 调用方(EventPlayerAnim)已递增攻击计数, 作为本次启动的作废标识
+    // 调用方(Han_OnKnifeAttack)已递增攻击计数, 作为本次启动的作废标识
     StartCustomAnimSafe(client, sequence, frames, g_iAttackID[client]);
 }
 
@@ -460,28 +465,27 @@ public Action Timer_ForcedFlowAnim(Handle timer, DataPack pack)
 }
 
 // ======================== 攻击事件处理 ========================
-public Action EventPlayerAnim(const char[] te_name, const int[] Players, int numClients, float delay)
+public void Han_OnKnifeAttack(int client, int weapon, int attackId, HanKnifeAttackType type)
 {
     if (!g_bEnable)
-        return Plugin_Continue;
-
-    int player = TE_ReadNum("m_hPlayer");
-    int animEvent = TE_ReadNum("m_iEvent");
-    int client = MakeCompatEntRef(player);
+        return;
 
     if (client <= 0 || client > MaxClients || !IsClientInGame(client) || !IsPlayerAlive(client))
-        return Plugin_Continue;
+        return;
 
-    int weapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
     if (weapon <= 0 || !IsValidEntity(weapon))
-        return Plugin_Continue;
+        return;
 
     int idx = GetKnifeIndexByWeapon(weapon);
     if (idx == -1)
-        return Plugin_Continue;
+        return;
 
-    if (animEvent != 0 && animEvent != 1)
-        return Plugin_Continue;
+    HanKnifeResult result;
+    if (!Han_GetKnifeAttackResult(client, attackId, result) || EntRefToEntIndex(result.WeaponRef) != weapon)
+        return;
+    g_iHanAttackID[client] = attackId;
+    g_iCooldownAttack[client] = 0;
+    g_iDamageAttackID[client] = 0;
 
     float now = GetGameTime();
 
@@ -515,7 +519,7 @@ public Action EventPlayerAnim(const char[] te_name, const int[] Players, int num
     int slot;
     int fps;
 
-    if (animEvent == 0)
+    if (type == HanKnife_Secondary)
     {
         // ===== 右键重击 =====
         slot = 3;
@@ -531,8 +535,11 @@ public Action EventPlayerAnim(const char[] te_name, const int[] Players, int num
 
         if (!wasIdle || bForcedFlow)
         {
-            SetEntPropFloat(weapon, Prop_Data, "m_flNextSecondaryAttack", now + g_Knives[idx].fRightInterval);
-            SetEntPropFloat(client, Prop_Data, "m_flNextAttack", now + g_Knives[idx].fRightInterval);
+            // Apply after the engine finishes Swing; never block ItemPostFrame/Smack.
+            g_iCooldownAttack[client] = attackId;
+            g_iCooldownWeapon[client] = EntIndexToEntRef(weapon);
+            g_fCooldownUntil[client] = now + g_Knives[idx].fRightInterval;
+            g_bCooldownSecondary[client] = true;
         }
     }
     else
@@ -548,8 +555,11 @@ public Action EventPlayerAnim(const char[] te_name, const int[] Players, int num
 
         if (!wasIdle || bForcedFlow)
         {
-            SetEntPropFloat(weapon, Prop_Data, "m_flNextPrimaryAttack", now + g_Knives[idx].fLeftInterval[phase]);
-            SetEntPropFloat(client, Prop_Data, "m_flNextAttack", now + g_Knives[idx].fLeftInterval[phase]);
+            // Apply after the engine finishes Swing; never block ItemPostFrame/Smack.
+            g_iCooldownAttack[client] = attackId;
+            g_iCooldownWeapon[client] = EntIndexToEntRef(weapon);
+            g_fCooldownUntil[client] = now + g_Knives[idx].fLeftInterval[phase];
+            g_bCooldownSecondary[client] = false;
         }
 
         g_iLeftPhase[client] = (phase + 1) % LEFT_COMBO_COUNT;
@@ -593,7 +603,37 @@ public Action EventPlayerAnim(const char[] te_name, const int[] Players, int num
         CreateTimer(float(g_iRotateFrame[idx][slot][i]) / float(fps), Timer_DelaySound, pack, TIMER_FLAG_NO_MAPCHANGE | TIMER_DATA_HNDL_CLOSE);
     }
 
-    return Plugin_Continue;
+    return;
+}
+
+// The engine overwrites weapon cooldowns after PlayerAnimEvent. The 8.2
+// Finished forward runs after that work, in the same PostThinkPost. Keep the
+// opposite button gated too, without suspending the weapon's feedback updates.
+public void Han_OnKnifeAttackFinished(int client, int weapon, int attackId)
+{
+    if (client < 1 || client > MaxClients || g_iCooldownAttack[client] != attackId)
+        return;
+    g_iCooldownAttack[client] = 0;
+    if (!g_bEnable || !IsClientInGame(client) || !IsPlayerAlive(client)
+        || weapon <= MaxClients || !IsValidEntity(weapon)
+        || EntIndexToEntRef(weapon) != g_iCooldownWeapon[client]
+        || GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon") != weapon
+        || g_iHanAttackID[client] != attackId || GetKnifeIndexByWeapon(weapon) == -1)
+        return;
+
+    float until = g_fCooldownUntil[client];
+    if (g_bCooldownSecondary[client])
+    {
+        SetEntPropFloat(weapon, Prop_Data, "m_flNextSecondaryAttack", until);
+        if (GetEntPropFloat(weapon, Prop_Data, "m_flNextPrimaryAttack") < until)
+            SetEntPropFloat(weapon, Prop_Data, "m_flNextPrimaryAttack", until);
+    }
+    else
+    {
+        SetEntPropFloat(weapon, Prop_Data, "m_flNextPrimaryAttack", until);
+        if (GetEntPropFloat(weapon, Prop_Data, "m_flNextSecondaryAttack") < until)
+            SetEntPropFloat(weapon, Prop_Data, "m_flNextSecondaryAttack", until);
+    }
 }
 
 public Action Timer_DelaySound(Handle timer, DataPack pack)
@@ -660,18 +700,10 @@ public Action EventPlayerHurt(Event event, const char[] name, bool dontBroadcast
     if (idx == -1)
         return Plugin_Continue;
 
-    float pos[3], ang[3];
-    GetClientEyePosition(attacker, pos);
-    GetClientEyeAngles(attacker, ang);
-
-    TR_TraceRayFilter(pos, ang, MASK_SHOT, RayType_Infinite, Trace_HitVictimOnly, victim);
-
-    int Hitgroup = TR_GetHitGroup();
-
-    SetEventInt(event, "hitgroup", Hitgroup);
-
-    // 保存这一次攻击的命中部位(击杀音判断用)
-    g_iLastKnifeHitGroup[victim][attacker] = Hitgroup;
+    HanKnifeResult result;
+    if (!GetCurrentDamageResult(attacker, victim, result))
+        return Plugin_Continue;
+    event.SetInt("hitgroup", result.HitGroupValid ? result.HitGroup : 0);
 
     // 命中音留空 = 不播放
     if (strlen(g_Knives[idx].sHitSound) > 0)
@@ -703,16 +735,10 @@ public Action EventPlayerDeath(Event event, const char[] name, bool dontBroadcas
     if (idx == -1)
         return Plugin_Continue;
 
-    char WeaponName[50];
-    GetEventString(event, "weapon", WeaponName, sizeof(WeaponName));
-
-    char eventWeaponClass[64];
-    Format(eventWeaponClass, sizeof(eventWeaponClass), "weapon_%s", WeaponName);
-
-    if (!StrEqual(eventWeaponClass, g_Knives[idx].sClassName, false))
+    HanKnifeResult result;
+    if (!GetCurrentDamageResult(attacker, victim, result))
         return Plugin_Continue;
-
-    int hitgroup = g_iLastKnifeHitGroup[victim][attacker];
+    int hitgroup = result.HitGroupValid ? result.HitGroup : 0;
 
     // 爆头击杀音(命中部位 0/1), 留空不播
     if ((hitgroup == 0 || hitgroup == 1) && strlen(g_Knives[idx].sHeadshotSound) > 0)
@@ -736,10 +762,15 @@ public void EventPlayerSpawn(Event event, const char[] name, bool dontBroadcast)
     ResetPlayerState(client);
 }
 
-// ======================== 射线过滤 ========================
-public bool Trace_HitVictimOnly(int entity, int contentsMask, any victim)
+// ======================== 本次伤害结果（无额外射线） ========================
+bool GetCurrentDamageResult(int attacker, int victim, HanKnifeResult result)
 {
-    return entity == victim;
+    if (victim < 1 || victim > MaxClients || !IsClientInGame(victim)
+        || g_iDamageTick[attacker] != GetGameTickCount()
+        || g_iDamageAttackID[attacker] == 0 || g_iDamageAttackID[attacker] != g_iHanAttackID[attacker])
+        return false;
+    return Han_GetKnifeAttackResult(attacker, g_iDamageAttackID[attacker], result)
+        && result.DamageEntered && EntRefToEntIndex(result.EntityRef) == victim;
 }
 
 // ======================== 配置读取 ========================
@@ -1285,36 +1316,8 @@ void RefreshDeltaKnifeCVars()
 
 // ============================================================================================
 // 强制改写覆盖快速近战的视图模型硬编码隐藏, 以便刀具动画和音效正常播放, 用于支持快速近战插件
-// 原版武器仅在 han_oldweaponfix 开启时参与; 新增武器由武器系统统一使用1号模型
+// 只修复主系统确认的VM1模式；VM0与NotReady不强制改写，不再维护原始武器名单
 // ============================================================================================
-
-bool IsOriginalWeaponClass(const char[] classname)
-{
-    // 与 CS:S 原版 scripts/weapon_*.txt 的29项文件名一致, 不含扩展名
-    static const char originalClasses[][] =
-    {
-        // 手枪
-        "weapon_glock", "weapon_usp", "weapon_p228", "weapon_deagle", "weapon_elite", "weapon_fiveseven",
-        // 霰弹枪
-        "weapon_m3", "weapon_xm1014",
-        // 冲锋枪
-        "weapon_mac10", "weapon_tmp", "weapon_mp5navy", "weapon_ump45", "weapon_p90",
-        // 步枪
-        "weapon_galil", "weapon_famas", "weapon_ak47", "weapon_m4a1", "weapon_aug", "weapon_sg552",
-        // 狙击枪
-        "weapon_scout", "weapon_awp", "weapon_g3sg1", "weapon_sg550",
-        // 机枪、刀、手雷和C4
-        "weapon_m249", "weapon_knife", "weapon_hegrenade", "weapon_flashbang", "weapon_smokegrenade", "weapon_c4"
-    };
-
-    for (int i = 0; i < sizeof(originalClasses); i++)
-    {
-        if (StrEqual(classname, originalClasses[i], false))
-            return true;
-    }
-
-    return false;
-}
 
 public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon, int &subtype, int &cmdnum, int &tickcount, int &seed, int mouse[2])
 {
@@ -1328,11 +1331,8 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
     if (ActiveWeapon <= 0 || !IsValidEntity(ActiveWeapon))
         return Plugin_Continue;
 
-    char classname[64];
-    GetEntityClassname(ActiveWeapon, classname, sizeof(classname));
-
-    // 原版武器在修复关闭或Cvar不可用时仍走0号模型, 不得改写其显隐
-    if (IsOriginalWeaponClass(classname) && (g_hOldWeaponFix == null || !g_hOldWeaponFix.BoolValue))
+    // Respect the confirmed mode; never guess VM0/VM1 from classnames.
+    if (Han_GetClientViewModelMode(client) != HanViewModel_VM1)
         return Plugin_Continue;
 
     int vm0 = GetClientViewModel(client, 0);

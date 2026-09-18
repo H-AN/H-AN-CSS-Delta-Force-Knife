@@ -44,7 +44,7 @@
 | --- | --- |
 | Counter-Strike: Source 专用服务器 | 游戏平台 |
 | SourceMod **1.12+** | 编译与运行环境 |
-| **HanWeaponSystem**（H-AN 武器系统） | 必须加载，提供 `Han_SetClientCustomAnim` 等动画 API |
+| **HanWeaponSystem 8.2**（H-AN 武器系统） | 2.1 版必需，提供刀攻击、扣血前伤害、部位缓存及模型模式 API；编译使用主仓库新版 include |
 
 ## 安装
 
@@ -177,8 +177,13 @@
 
 ## 工作原理（简述）
 
-- 通过 TempEnt Hook `PlayerAnimEvent` 捕获玩家的右键（`m_iEvent=0`）/左键（`m_iEvent=1`）攻击动画事件，推进连招状态机，改写 `m_flNextPrimaryAttack` / `m_flNextSecondaryAttack` / `m_flNextAttack` 控制攻速，并调用 HanWeaponSystem 的 `Han_SetClientCustomAnim` 播放自定义动画
-- 通过 `SDKHook_TraceAttack` 接管伤害：从攻击者视角对受害者做射线检测取命中部位，命中头部（1）按爆头倍率计算，射线未命中（0）同样按爆头兜底（与北极星行为一致）
+- 2.1 通过 `Han_OnKnifeAttack` 推进左右键连招；不再同时监听 `PlayerAnimEvent`，避免一次攻击推进两次。保留原有间隔设置、自定义动画及快速近战延迟动画逻辑。
+- 通过扣血前的 `Han_OnKnifeDamage` 统一处理原版命中和超距补伤，从 `Han_GetKnifeAttackResult` 读取本刀部位，不再自行发射射线。明确头部或未知部位仍使用原有爆头倍率，其后应用原有 Bot 倍率；主系统填写的 damage 参数继续叠加。
+- 命中与击杀音使用当前攻击编号、目标和同一 tick 的结果；致死刀无需等待 player_hurt 更新上一刀缓存。VM 显隐修复仅在 `Han_GetClientViewModelMode` 返回 VM1 时执行，VM0/NotReady 跳过，不再硬编码原始武器名单或读取 han_oldweaponfix。
+
+本次未修改刀具配置或部署服务器。编译产物：`D:\github\git\build\DeltaForceKnife-2.1.smx`。必须与 HanWeaponSystem 8.2 配套使用；旧版 8.1 缺少必要 native，无法加载此版伴生插件。
+
+进服待验证：左右键连招与原有动画/CD；原版范围和超距目标使用同样的段位伤害；第一刀头部、头转身体、未知部位兜底；Bot 倍率；第一刀致死的击杀音；快速切刀在 VM 未就绪时交由主系统接管。主系统的有限距离检测与旧无限射线不同，部位分类可能更经常返回未知，但本插件保留未知按爆头的规则。
 - 转刀音通过携带攻击 ID 的定时器播放，延迟 = 配置的转刀帧号 ÷ 动画 fps（精确换算，不做取整）；逗号分隔的多条组合音效每条独立一个定时器，各自按帧号延迟，共用转刀通道（后者自然打断前者）；新攻击会作废旧攻击尚未播放的转刀音
 - 命中部位写入 `player_hurt` 事件的 `hitgroup` 字段并记录，供击杀音判断
 
